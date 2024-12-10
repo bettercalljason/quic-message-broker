@@ -1,17 +1,28 @@
 use core::ascii;
 use std::{
-    fs, io, net::SocketAddr, path::{self, Path, PathBuf}, str, sync::Arc
+    collections::HashSet, fs, io, net::SocketAddr, path::{self, Path, PathBuf}, str, sync::Arc
 };
 
+
+use bytes::BytesMut;
 use clap::Parser;
 
 use anyhow::{anyhow, bail, Context, Result};
+use mqttbytes::{
+    check,
+    v4::Connect,
+    v5::{read, ConnAck, Packet},
+};
+use quic_message_broker::read2;
 use quinn::crypto::rustls::QuicServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use tokio::io::AsyncReadExt;
 use tracing::{error, info, info_span};
 use tracing_futures::Instrument as _;
 
 const ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"];
+
+pub struct ClientState {}
 
 #[derive(Parser, Debug)]
 #[clap(name = "server")]
@@ -39,7 +50,6 @@ struct Opt {
     /// Maximum number of concurrent connections to allow
     #[clap(long = "connection-limit")]
     connection_limit: Option<usize>,
-
 }
 
 fn main() {
@@ -50,7 +60,9 @@ fn main() {
     )
     .unwrap();
 
-    rustls::crypto::ring::default_provider().install_default().expect("Failed to install rustls crypto provider");
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
 
     let opt = Opt::parse();
     let code = {
@@ -185,9 +197,7 @@ async fn handle_connection(root: Arc<Path>, conn: quinn::Incoming) -> Result<()>
                     info!("connection closed");
                     return Ok(());
                 }
-                Err(e) => {
-                    return Err(e)
-                }
+                Err(e) => return Err(e),
                 Ok(s) => s,
             };
             let fut = handle_request(root.clone(), stream);
@@ -197,7 +207,7 @@ async fn handle_connection(root: Arc<Path>, conn: quinn::Incoming) -> Result<()>
                         error!("failed: {reason}", reason = e.to_string());
                     }
                 }
-                .instrument(info_span!("request"))
+                .instrument(info_span!("request")),
             );
         }
     }
@@ -210,60 +220,70 @@ async fn handle_request(
     root: Arc<Path>,
     (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
 ) -> Result<()> {
-    let req = recv
-        .read_to_end(64 * 1024)
-        .await
-        .map_err(|e| anyhow!("failed reading request: {}", e))?;
-    let mut escaped = String::new();
-    for &x in &req[..] {
-        let part = ascii::escape_default(x).collect::<Vec<_>>();
-        escaped.push_str(str::from_utf8(&part).unwrap());
+    // Create a BytesMut buffer to hold data read from the stream.
+    let mut buf = BytesMut::with_capacity(1024);
+
+    info!("begin handle");
+
+    loop {
+        // Read some data into the BytesMut buffer from the async recv_stream.
+        // `read_buf` will read as many bytes as available (up to buf's capacity)
+        // and advance the buffer's "written" length accordingly.
+        let bytes_read = recv.read_buf(&mut buf).await?;
+
+        if bytes_read == 0 {
+            // Stream closed (EOF)
+            break;
+        }
+
+        // Try to parse as many MQTT packets as possible from the buffer
+        loop {
+            read2(&mut buf);
+        }
     }
-    info!(content = %escaped);
-    // Execute the request
-    let resp = process_get(&root, &req).unwrap_or_else(|e| {
-        error!("failed: {}", e);
-        format!("failed to process request: {e}\n").into_bytes()
-    });
-    // Write the resposne
-    send.write_all(&resp)
-        .await
-        .map_err(|e| anyhow!("failed to send response: {}", e))?;
-    // Gracefully terminate the stream
-    send.finish().unwrap();
-    info!("complete");
+
+    info!("end handle");
+
+    // let req = recv
+    //     .read_to_end(64 * 1024)
+    //     .await
+    //     .map_err(|e| anyhow!("failed reading request: {}", e))?;
+    // let mut escaped = String::new();
+    // for &x in &req[..] {
+    //     let part = ascii::escape_default(x).collect::<Vec<_>>();
+    //     escaped.push_str(str::from_utf8(&part).unwrap());
+    // }
+    // info!(content = %escaped);
+    // // Execute the request
+    // let resp = process_get(&root, &req).unwrap_or_else(|e| {
+    //     error!("failed: {}", e);
+    //     format!("failed to process request: {e}\n").into_bytes()
+    // });
+    // // Write the resposne
+    // send.write_all(&resp)
+    //     .await
+    //     .map_err(|e| anyhow!("failed to send response: {}", e))?;
+    // // Gracefully terminate the stream
+    // send.finish().unwrap();
+    // info!("complete");
     Ok(())
 }
 
-fn process_get(root: &Path, x: &[u8]) -> Result<Vec<u8>> {
-    if x.len() < 4 || &x[0..4] != b"GET " {
-        bail!("missing GET");
+fn process_packet(packet: Packet, state: ConnectionState) -> Result<Option<Packet>> {
+    match packet {
+        Packet::Connect(connect) => todo!(),
+        Packet::ConnAck(conn_ack) => todo!(),
+        Packet::Publish(publish) => todo!(),
+        Packet::PubAck(pub_ack) => todo!(),
+        Packet::PubRec(pub_rec) => todo!(),
+        Packet::PubRel(pub_rel) => todo!(),
+        Packet::PubComp(pub_comp) => todo!(),
+        Packet::Subscribe(subscribe) => todo!(),
+        Packet::SubAck(sub_ack) => todo!(),
+        Packet::Unsubscribe(unsubscribe) => todo!(),
+        Packet::UnsubAck(unsub_ack) => todo!(),
+        Packet::PingReq => todo!(),
+        Packet::PingResp => todo!(),
+        Packet::Disconnect(disconnect) => todo!(),
     }
-    if x[4..].len() < 2 || &x[x.len() - 2..] != b"\r\n" {
-        bail!("missing \\r\\n");
-    }
-    let x = &x[4..x.len() - 2];
-    let end = x.iter().position(|&c| c == b' ').unwrap_or(x.len());
-    let path = str::from_utf8(&x[..end]).context("path is malformed UTF-8")?;
-    let path = Path::new(&path);
-    let mut real_path = PathBuf::from(root);
-    let mut components = path.components();
-    match components.next() {
-        Some(path::Component::RootDir) => {}
-        _ => {
-            bail!("path must be absolute");
-        }
-    }
-    for c in components {
-        match c {
-            path::Component::Normal(x) => {
-                real_path.push(x);
-            }
-            x => {
-                bail!("illegal component in path: {:?}", x)
-            }
-        }
-    }
-    let data = fs::read(&real_path).context("failed reading file")?;
-    Ok(data)
 }

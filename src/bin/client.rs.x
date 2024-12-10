@@ -12,6 +12,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
+use bytes::BytesMut;
 use clap::Parser;
 use quinn_proto::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::CertificateDer;
@@ -132,9 +133,16 @@ async fn run(options: Opt) -> Result<()> {
       endpoint.rebind(socket).expect("rebind failed");
   }
 
-  send.write_all(request.as_bytes())
-      .await
-      .map_err(|e| anyhow!("failed to send request: {}", e))?;
+  let connect_packet = mqttbytes::v5::Connect::new("bla");
+
+  let mut buf = BytesMut::new();
+  connect_packet.write(&mut buf).map_err(|e| anyhow!("failed to send request: {}", e))?;
+
+  send.write_all(&buf).await?;
+
+//   send.write_all(request.as_bytes())
+//       .await
+//       .map_err(|e| anyhow!("failed to send request: {}", e))?;
   send.finish().unwrap();
   let response_start = Instant::now();
   eprintln!("request sent at {:?}", response_start - start);
