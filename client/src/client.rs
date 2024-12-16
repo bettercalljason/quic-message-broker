@@ -7,15 +7,16 @@ use std::{
     time::Instant,
 };
 
+use anyhow::Context;
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use clap::Parser;
 use myprotocol::{ServerError, ALPN_QUIC_HTTP};
 use quinn::Endpoint;
 use quinn_proto::crypto::rustls::QuicClientConfig;
-use rustls::pki_types::CertificateDer;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::io::AsyncReadExt;
-use tracing::{error, info};
+use tracing::info;
 
 #[derive(Parser, Debug)]
 #[clap(name = "client-config")]
@@ -32,8 +33,8 @@ pub struct ClientConfig {
     host: String,
 
     /// Custom certificate authority to trust, in DER format
-    #[clap(long = "ca")]
-    ca: Option<PathBuf>,
+    #[clap(long = "ca", default_value = "..\\tlsgen\\server\\cert.der")]
+    ca: PathBuf,
 
     /// Simulate NAT rebinding after connecting
     #[clap(long = "rebind")]
@@ -42,6 +43,13 @@ pub struct ClientConfig {
     /// Address to bind on
     #[clap(long = "bind", default_value = "[::]:0")]
     bind: SocketAddr,
+
+    /// TLS private key in PEM format
+    #[clap(short = 'k', long = "key", requires = "cert", default_value = "..\\tlsgen\\client\\key.der")]
+    pub key: PathBuf,
+    /// TLS certificate in PEM format
+    #[clap(short = 'c', long = "cert", requires = "key", default_value = "..\\tlsgen\\client\\cert.der")]
+    pub cert: PathBuf,
 }
 
 pub async fn run_client(config: ClientConfig) -> Result<()> {
@@ -76,9 +84,6 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
 
     send.write_all(&buf).await?;
 
-    //   send.write_all(request.as_bytes())
-    //       .await
-    //       .map_err(|e| anyhow!("failed to send request: {}", e))?;
     send.finish().unwrap();
     let response_start = Instant::now();
     eprintln!("request sent at {:?}", response_start - start);
@@ -115,25 +120,29 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
 
 async fn setup_quic(config: &ClientConfig) -> Result<Endpoint> {
     let mut roots = rustls::RootCertStore::empty();
-    if let Some(ca_path) = &config.ca {
-        roots.add(CertificateDer::from(fs::read(ca_path)?))?;
+    roots.add(CertificateDer::from(fs::read(&config.ca)?))?;
+
+    let key = fs::read(&config.key).context("failed to read private key")?;
+    let key = if config.key.extension().is_some_and(|x| x == "der") {
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key))
     } else {
-        let dirs = directories_next::ProjectDirs::from("org", "quinn", "quinn-examples").unwrap();
-        match fs::read(dirs.data_local_dir().join("cert.der")) {
-            Ok(cert) => {
-                roots.add(CertificateDer::from(cert))?;
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::NotFound => {
-                info!("local server certificate not found");
-            }
-            Err(e) => {
-                error!("failed to open local server certificate: {}", e);
-            }
-        }
-    }
+        rustls_pemfile::private_key(&mut &*key)
+            .context("malformed PKCS #1 private key")?
+            .ok_or_else(|| anyhow::Error::msg("no private keys found"))?
+    };
+    let certs = fs::read(&config.cert).context("failed to read certificate chain")?;
+    let certs = if config.cert.extension().is_some_and(|x| x == "der") {
+        vec![CertificateDer::from(certs)]
+    } else {
+        rustls_pemfile::certs(&mut &*certs)
+            .collect::<Result<_, _>>()
+            .context("invalid PEM-encoded certificate")?
+    };
+
     let mut client_crypto = rustls::ClientConfig::builder()
         .with_root_certificates(roots)
-        .with_no_client_auth();
+        //.with_no_client_auth();
+        .with_client_auth_cert(certs, key)?;
 
     client_crypto.alpn_protocols = ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
     if config.keylog {
@@ -147,4 +156,3 @@ async fn setup_quic(config: &ClientConfig) -> Result<Endpoint> {
 
     Ok(endpoint)
 }
-

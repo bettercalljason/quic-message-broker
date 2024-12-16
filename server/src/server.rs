@@ -1,19 +1,17 @@
 use anyhow::Result;
 use clap::Parser;
 use myprotocol::{MqttHandler, ALPN_QUIC_HTTP};
-use std::io;
+use rustls::server::WebPkiClientVerifier;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::{fs, sync::Arc};
 
-use anyhow::bail;
 use anyhow::Context;
 use bytes::BytesMut;
 use quinn::crypto::rustls::QuicServerConfig;
 use quinn::{Connection, Endpoint};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::io::AsyncReadExt;
-use tracing::info;
 
 use myprotocol::{ProtocolHandler, ServerError, ServerState};
 
@@ -24,11 +22,14 @@ pub struct ServerConfig {
     #[clap(long = "keylog")]
     pub keylog: bool,
     /// TLS private key in PEM format
-    #[clap(short = 'k', long = "key", requires = "cert")]
-    pub key: Option<PathBuf>,
+    #[clap(short = 'k', long = "key", requires = "cert", default_value = "..\\tlsgen\\server\\key.der")]
+    pub key: PathBuf,
     /// TLS certificate in PEM format
-    #[clap(short = 'c', long = "cert", requires = "key")]
-    pub cert: Option<PathBuf>,
+    #[clap(short = 'c', long = "cert", requires = "key", default_value = "..\\tlsgen\\server\\cert.der")]
+    pub cert: PathBuf,
+    /// TLS client certificate in PEM format to trust
+    #[clap(long = "client_cert", default_value = "..\\tlsgen\\client\\cert.der")]
+    pub client_cert: PathBuf,
     /// Enable stateless retries
     #[clap(long = "stateless-retry")]
     pub stateless_retry: bool,
@@ -57,56 +58,30 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
 }
 
 async fn setup_quic(config: ServerConfig) -> Result<Endpoint> {
-    let (certs, key) = if let (Some(key_path), Some(cert_path)) = (&config.key, &config.cert) {
-        let key = fs::read(key_path).context("failed to read private key")?;
-        let key = if key_path.extension().is_some_and(|x| x == "der") {
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key))
-        } else {
-            rustls_pemfile::private_key(&mut &*key)
-                .context("malformed PKCS #1 private key")?
-                .ok_or_else(|| anyhow::Error::msg("no private keys found"))?
-        };
-        let cert_chain = fs::read(cert_path).context("failed to read certificate chain")?;
-        let cert_chain = if cert_path.extension().is_some_and(|x| x == "der") {
-            vec![CertificateDer::from(cert_chain)]
-        } else {
-            rustls_pemfile::certs(&mut &*cert_chain)
-                .collect::<Result<_, _>>()
-                .context("invalid PEM-encoded certificate")?
-        };
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(CertificateDer::from(fs::read(&config.client_cert)?))?;
 
-        (cert_chain, key)
+    let key = fs::read(&config.key).context("failed to read private key")?;
+    let key = if config.key.extension().is_some_and(|x| x == "der") {
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key))
     } else {
-        let dirs = directories_next::ProjectDirs::from("org", "quinn", "quinn-examples").unwrap();
-        let path = dirs.data_local_dir();
-        let cert_path = path.join("cert.der");
-        let key_path = path.join("key.der");
-        let (cert, key) = match fs::read(&cert_path).and_then(|x| Ok((x, fs::read(&key_path)?))) {
-            Ok((cert, key)) => (
-                CertificateDer::from(cert),
-                PrivateKeyDer::try_from(key).map_err(anyhow::Error::msg)?,
-            ),
-            Err(ref e) if e.kind() == io::ErrorKind::NotFound => {
-                info!("generating self-signed certificate");
-                let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-                let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
-                let cert = cert.cert.into();
-                fs::create_dir_all(path).context("failed to create certificate directory")?;
-                fs::write(&cert_path, &cert).context("failed to write certificate")?;
-                fs::write(&key_path, key.secret_pkcs8_der())
-                    .context("failed to write private key")?;
-                (cert, key.into())
-            }
-            Err(e) => {
-                bail!("failed to read certificate: {}", e);
-            }
-        };
-
-        (vec![cert], key)
+        rustls_pemfile::private_key(&mut &*key)
+            .context("malformed PKCS #1 private key")?
+            .ok_or_else(|| anyhow::Error::msg("no private keys found"))?
+    };
+    let certs = fs::read(&config.cert).context("failed to read certificate chain")?;
+    let certs = if config.cert.extension().is_some_and(|x| x == "der") {
+        vec![CertificateDer::from(certs)]
+    } else {
+        rustls_pemfile::certs(&mut &*certs)
+            .collect::<Result<_, _>>()
+            .context("invalid PEM-encoded certificate")?
     };
 
+    let verifier = WebPkiClientVerifier::builder(roots.into()).build()?;
+
     let mut server_crypto = rustls::ServerConfig::builder()
-        .with_no_client_auth()
+        .with_client_cert_verifier(verifier)
         .with_single_cert(certs, key)?;
     server_crypto.alpn_protocols = ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
     if config.keylog {
