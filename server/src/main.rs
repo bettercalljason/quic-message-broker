@@ -1,8 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use myprotocol::Opt;
-use server::run_server;
-
+use server::{run_server, ServerConfig};
 mod server;
 
 fn main() {
@@ -17,9 +15,9 @@ fn main() {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    let opt = Opt::parse();
+    let config = ServerConfig::parse();
     let code = {
-        if let Err(e) = run(opt) {
+        if let Err(e) = run(config) {
             eprintln!("ERROR: {e}");
             1
         } else {
@@ -30,8 +28,8 @@ fn main() {
 }
 
 #[tokio::main]
-async fn run(options: Opt) -> Result<()> {
-    run_server(options).await?;
+async fn run(config: ServerConfig) -> Result<()> {
+    run_server(config).await?;
 
     Ok(())
 }
