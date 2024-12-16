@@ -14,6 +14,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use clap::Parser;
+use myprotocol::ServerError;
 use quinn_proto::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::CertificateDer;
 use tokio::io::AsyncReadExt;
@@ -30,6 +31,7 @@ struct Opt {
     #[clap(long = "keylog")]
     keylog: bool,
 
+    #[clap(default_value = "https://localhost:4433/foobarbaz")]
     url: Url,
 
     /// Override hostname used for certificate verification
@@ -168,16 +170,12 @@ async fn run(options: Opt) -> Result<()> {
             break; // EOF
         }
 
-        match mqttbytes::v5::read(&mut tmp, 1024 * 1024) {
-            Ok(packet) => {
-                info!("Received packet: {:?}", packet);
-                break;
-            }
-            Err(mqttbytes::Error::InsufficientBytes(_)) => info!("Insufficient bytes..."),
-            Err(e) => {
-                error!("Could not parse packet :( {:?}", e);
-                break;
-            }
+        while let Some(packet) = match mqttbytes::v5::read(&mut tmp, 1024 * 1024) {
+            Ok(packet) => Ok(Some(packet)),
+            Err(mqttbytes::Error::InsufficientBytes(_)) => Ok(None),
+            Err(e) => Err(ServerError::MqttError(e))
+        }? {
+            info!("Received packet: {:?}", packet);
         }
     }
 

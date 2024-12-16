@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
-use mqttbytes::v5::{ConnAck, ConnectReturnCode, Packet};
+use mqttbytes::v5::{ConnAck, ConnAckProperties, Connect, ConnectReturnCode, Packet};
 use quinn::SendStream;
 use tracing::info;
 
@@ -40,13 +40,18 @@ impl MqttHandler {
     async fn send_connack(&self, send_stream: &mut SendStream) -> Result<(), ServerError> {
         // Create and write a ConnAck packet
 
-        let x = ConnAck::new(ConnectReturnCode::Success, false);
+        let x = ConnAck {
+            session_present: false,
+            code: ConnectReturnCode::Success,
+            properties: Some(ConnAckProperties::new())
+        };
         let mut buf = BytesMut::new();
-        x.write(&mut buf);
+        x.write(&mut buf).map_err(|e|ServerError::MqttError((e)))?;
 
         info!("Sending: {:?}, buf: {:?}", x, buf);
 
         send_stream.write_all(&buf).await;
+        send_stream.finish().unwrap();
 
         Ok(())
     }
