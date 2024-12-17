@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bytes::BytesMut;
 use quinn::SendStream;
 
-use crate::{error::ServerError, state::ServerState};
+use crate::{error::ServerError, mqtt::MqttEvent, state::ServerState};
 
 #[async_trait::async_trait]
 pub trait ProtocolHandler {
@@ -11,8 +11,7 @@ pub trait ProtocolHandler {
         &self,
         buf: &mut BytesMut,
         server_state: &Arc<ServerState>,
-        send_stream: &mut SendStream,
-    ) -> Result<(), ServerError>;
+    ) -> Result<Vec<MqttEvent>, ServerError>;
 
     // You could also define methods for initialization, cleanup,
     // or other protocol-specific actions as needed.

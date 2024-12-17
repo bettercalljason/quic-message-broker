@@ -1,15 +1,18 @@
 use anyhow::Result;
 use clap::Parser;
-use myprotocol::{MqttHandler, ALPN_QUIC_HTTP};
+use mqttbytes::v5::{ConnAck, ConnAckProperties, ConnectReturnCode, Publish};
+use myprotocol::{MqttEvent, MqttHandler, OutgoingMessage, ALPN_QUIC_HTTP};
 use rustls::server::WebPkiClientVerifier;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::{fs, sync::Arc};
+use tokio::sync::mpsc;
+use tracing::{error, info};
 
 use anyhow::Context;
 use bytes::BytesMut;
 use quinn::crypto::rustls::QuicServerConfig;
-use quinn::{Connection, Endpoint};
+use quinn::{Connection, Endpoint, SendStream};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::io::AsyncReadExt;
 
@@ -22,10 +25,20 @@ pub struct ServerConfig {
     #[clap(long = "keylog")]
     pub keylog: bool,
     /// TLS private key in PEM format
-    #[clap(short = 'k', long = "key", requires = "cert", default_value = "..\\tlsgen\\server\\key.der")]
+    #[clap(
+        short = 'k',
+        long = "key",
+        requires = "cert",
+        default_value = "..\\tlsgen\\server\\key.der"
+    )]
     pub key: PathBuf,
     /// TLS certificate in PEM format
-    #[clap(short = 'c', long = "cert", requires = "key", default_value = "..\\tlsgen\\server\\cert.der")]
+    #[clap(
+        short = 'c',
+        long = "cert",
+        requires = "key",
+        default_value = "..\\tlsgen\\server\\cert.der"
+    )]
     pub cert: PathBuf,
     /// TLS client certificate in PEM format to trust
     #[clap(long = "client_cert", default_value = "..\\tlsgen\\client\\cert.der")]
@@ -129,20 +142,107 @@ async fn handle_connection(
     while let Ok((mut send_stream, mut recv_stream)) = conn.accept_bi().await {
         let mut buf = BytesMut::new();
 
+        // Expecting a CONNECT packet here...
         // Read data from recv_stream
-        let n = recv_stream
-            .read_buf(&mut buf)
-            .await
-            .unwrap_or_else(|e| todo!());
+        let n = recv_stream.read_buf(&mut buf).await.unwrap_or(0);
 
         if n == 0 {
             // Stream closed (EOF)
             break;
         }
 
-        handler
-            .handle_bytes(&mut buf, &server_state, &mut send_stream)
-            .await?;
+        let mut a_client_id: Option<String> = None;
+
+        let mut events = handler.handle_bytes(&mut buf, &server_state).await?;
+
+        if let Some(pos) = events
+            .iter()
+            .position(|e| matches!(e, MqttEvent::ClientConnected { .. }))
+        {
+            // Remove the event from the vector
+            let event = events.remove(pos);
+
+            // Now handle the ClientConnected event seperatley
+            if let MqttEvent::ClientConnected { client_id } = event {
+                let (tx, rx) = mpsc::channel(100);
+
+                server_state.add_client(&client_id, tx).await;
+                a_client_id = Some(client_id.clone());
+
+                // Now you have full control over how you handle send_stream
+                let send_stream_for_task = send_stream;
+                tokio::spawn(async move {
+                    if let Err(e) = connection_task(send_stream_for_task, rx, client_id).await {
+                        error!("Connection task ended with error: {:?}", e);
+                    }
+                });
+            }
+        };
+
+        if let Some(client_id) = a_client_id {
+            // Handle the rest of the events
+            for event in events {
+                match event {
+                    MqttEvent::ClientConnected { .. } => error!("Client already connected!"),
+                    MqttEvent::ClientDisconnected => {
+                        info!("Client {} disconnected", client_id);
+                        server_state.remove_client(&client_id).await;
+                    }
+                    MqttEvent::ClientSubscribed { topic, qos } => {
+                        server_state.add_subscription(&client_id, &topic, qos).await;
+                    }
+                    MqttEvent::PublishReceived { topic, payload } => {
+                        server_state.handle_publish(&Publish::new(topic, mqttbytes::QoS::AtLeastOnce, payload)).await;
+                    }
+                }
+            }
+        } else {
+            panic!("No client ID")
+        }
     }
+    Ok(())
+}
+
+async fn connection_task(
+    mut send_stream: SendStream,
+    mut receiver: mpsc::Receiver<OutgoingMessage>,
+    client_id: String,
+) -> Result<(), ServerError> {
+    // This task runs per client connection.
+    // It listens for OutgoingMessage from the receiver.
+    while let Some(msg) = receiver.recv().await {
+        let mut buf = BytesMut::new();
+        match msg {
+            OutgoingMessage::ConnAck(packet) => {
+                packet
+                    .write(&mut buf)
+                    .map_err(|e| ServerError::MqttError(e))?;
+            }
+            OutgoingMessage::Publish(packet) => {
+                packet
+                    .write(&mut buf)
+                    .map_err(|e| ServerError::MqttError(e))?;
+            }
+            OutgoingMessage::PubAck(packet) => {
+                packet
+                    .write(&mut buf)
+                    .map_err(|e| ServerError::MqttError(e))?;
+            }
+        }
+
+        // Write the serialized packet to the QUIC stream
+        send_stream
+            .write_all(&buf)
+            .await
+            .map_err(|e| ServerError::QuinnWriteError(e))?;
+    }
+
+    // When the sender side is dropped (or client is removed), this loop ends.
+    // We can close the connection gracefully here if needed.
+    send_stream
+        .finish()
+        .map_err(|e| ServerError::QuinnClosedStreamError(e))?;
+    info!("Connection task for {} closed", client_id);
+
     Ok(())
 }

@@ -4,9 +4,18 @@ use async_trait::async_trait;
 use bytes::BytesMut;
 use mqttbytes::v5::{ConnAck, ConnAckProperties, Connect, ConnectReturnCode, Packet};
 use quinn::SendStream;
-use tracing::info;
+use tokio::sync::mpsc;
+use tracing::{error, info};
 
-use crate::{error::ServerError, protocol::ProtocolHandler, state::ServerState};
+use crate::{error::ServerError, protocol::ProtocolHandler, state::ServerState, OutgoingMessage};
+
+pub enum MqttEvent {
+    ClientConnected { client_id: String },
+    PublishReceived { topic: String, payload: Vec<u8> },
+    ClientSubscribed { topic: String, qos: u8 },
+    ClientDisconnected,
+    // ... other events
+}
 
 pub struct MqttHandler {
     max_packet_size: usize,
@@ -21,39 +30,17 @@ impl MqttHandler {
         &self,
         packet: Packet,
         server_state: &Arc<ServerState>,
-        send_stream: &mut SendStream,
-    ) -> Result<(), ServerError> {
-        info!("Packet received yay: {:?}", packet);
+    ) -> Result<MqttEvent, ServerError> {
         match packet {
-            Packet::Connect(c) => {
-                server_state.add_client(&c.client_id);
-                self.send_connack(send_stream).await?;
-            }
-            Packet::Publish(p) => {
-                server_state.handle_publish(&p).await?;
-            }
-            _ => {}
+            Packet::Connect(p) => Ok(MqttEvent::ClientConnected {
+                client_id: p.client_id,
+            }),
+            Packet::Subscribe(p) => Ok(MqttEvent::ClientSubscribed {
+                topic: "foo".to_string(),
+                qos: 1
+            }),
+            _ => todo!(),
         }
-        Ok(())
-    }
-
-    async fn send_connack(&self, send_stream: &mut SendStream) -> Result<(), ServerError> {
-        // Create and write a ConnAck packet
-
-        let x = ConnAck {
-            session_present: false,
-            code: ConnectReturnCode::Success,
-            properties: Some(ConnAckProperties::new())
-        };
-        let mut buf = BytesMut::new();
-        x.write(&mut buf).map_err(|e|ServerError::MqttError((e)))?;
-
-        info!("Sending: {:?}, buf: {:?}", x, buf);
-
-        send_stream.write_all(&buf).await;
-        send_stream.finish().unwrap();
-
-        Ok(())
     }
 
     fn try_parse_packet(&self, buf: &mut BytesMut) -> Result<Option<Packet>, ServerError> {
@@ -71,12 +58,14 @@ impl ProtocolHandler for MqttHandler {
         &self,
         buf: &mut BytesMut,
         server_state: &Arc<ServerState>,
-        send_stream: &mut SendStream,
-    ) -> Result<(), ServerError> {
+    ) -> Result<Vec<MqttEvent>, ServerError> {
+        let mut events = Vec::new();
+
         while let Some(packet) = self.try_parse_packet(buf)? {
-            self.handle_packet(packet, server_state, send_stream)
-                .await?;
+            let event = self.handle_packet(packet, server_state).await?;
+            events.push(event);
         }
-        Ok(())
+
+        Ok(events)
     }
 }

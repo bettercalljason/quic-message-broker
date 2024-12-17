@@ -45,10 +45,20 @@ pub struct ClientConfig {
     bind: SocketAddr,
 
     /// TLS private key in PEM format
-    #[clap(short = 'k', long = "key", requires = "cert", default_value = "..\\tlsgen\\client\\key.der")]
+    #[clap(
+        short = 'k',
+        long = "key",
+        requires = "cert",
+        default_value = "..\\tlsgen\\client\\key.der"
+    )]
     pub key: PathBuf,
     /// TLS certificate in PEM format
-    #[clap(short = 'c', long = "cert", requires = "key", default_value = "..\\tlsgen\\client\\cert.der")]
+    #[clap(
+        short = 'c',
+        long = "cert",
+        requires = "key",
+        default_value = "..\\tlsgen\\client\\cert.der"
+    )]
     pub cert: PathBuf,
 }
 
@@ -84,7 +94,7 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
 
     send.write_all(&buf).await?;
 
-    send.finish().unwrap();
+    //send.finish().unwrap();
     let response_start = Instant::now();
     eprintln!("request sent at {:?}", response_start - start);
 
@@ -107,6 +117,15 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
         }? {
             info!("Received packet: {:?}", packet);
         }
+
+        let disconnect_packet = mqttbytes::v5::Disconnect::new();
+        disconnect_packet
+            .write(&mut buf)
+            .map_err(|e| anyhow!("failed to send request: {}", e))?;
+
+        info!("Sent {:?}", disconnect_packet);
+
+        send.write_all(&buf).await?;
     }
 
     io::stdout().flush().unwrap();

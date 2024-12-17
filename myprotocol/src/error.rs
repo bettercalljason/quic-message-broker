@@ -1,6 +1,10 @@
+use quinn::{ClosedStream, WriteError};
+
 #[derive(Debug)]
 pub enum ServerError {
     MqttError(mqttbytes::Error),
+    QuinnWriteError(WriteError),
+    QuinnClosedStreamError(ClosedStream),
     // other variants
 }
 
