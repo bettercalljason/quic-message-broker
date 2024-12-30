@@ -25,6 +25,12 @@ pub struct ServerState {
     clients: RwLock<HashMap<ClientID, ClientState>>,
 }
 
+impl Default for ServerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ServerState {
     pub fn new() -> Self {
         Self {
@@ -45,7 +51,7 @@ impl ServerState {
 
     pub async fn second_connect_error(&self, client_id: &ClientID) -> Result<(), ServerError> {
         let mut map = self.clients.write().await;
-        if let Some(client) = map.get_mut(&client_id) {
+        if let Some(client) = map.get_mut(client_id) {
             client
                 .sender
                 .send(OutgoingMessage::ConnAck(ConnAck {
@@ -54,7 +60,7 @@ impl ServerState {
                     properties: None,
                 }))
                 .await
-                .map_err(|e| ServerError::SendError(e))?;
+                .map_err(ServerError::SendError)?;
 
             Ok(())
         } else {
@@ -75,7 +81,7 @@ impl ServerState {
                 properties: Some(ConnAckProperties::new()),
             }))
             .await
-            .map_err(|e| ServerError::SendError(e))?;
+            .map_err(ServerError::SendError)?;
 
         let mut map = self.clients.write().await;
         map.insert(
@@ -104,7 +110,7 @@ impl ServerState {
         qos: u8,
     ) -> Result<(), String> {
         let mut map = self.clients.write().await;
-        if let Some(client) = map.get_mut(&client_id) {
+        if let Some(client) = map.get_mut(client_id) {
             // Check if already subscribed or just push new
             // For simplicity:
             client.subscribed_topics.push((topic.to_string(), qos));

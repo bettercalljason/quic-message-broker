@@ -1,20 +1,11 @@
-use std::{
-    fmt::{self, Display},
-    fs,
-    io::{self, Write},
-    net::SocketAddr,
-    path::PathBuf,
-    sync::Arc,
-    time::Instant,
-};
+use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 
 use anyhow::Context;
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use clap::Parser;
 use inquire::Select;
-use mqttbytes::v5::DisconnectProperties;
-use myprotocol::{ClientID, MqttHandler, ProtocolHandler, ServerError, ALPN_QUIC_HTTP};
+use myprotocol::{ClientID, MqttHandler, ServerError, ALPN_QUIC_HTTP};
 use quinn::Endpoint;
 use quinn_proto::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};

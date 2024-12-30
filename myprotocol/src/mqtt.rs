@@ -26,6 +26,12 @@ pub enum MqttEvent {
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct ClientID(String);
 
+impl Default for ClientID {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ClientID {
     pub fn new() -> Self {
         let mut rng = ChaCha20Rng::from_entropy();
@@ -58,7 +64,7 @@ impl From<ClientID> for String {
 impl TryFrom<String> for ClientID {
     type Error = String;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.len() < 1 || value.len() > 23 {
+        if value.is_empty() || value.len() > 23 {
             return Err(format!(
                 "ClientID has invalid length: {}. Must be between 1 - 23 charaters.",
                 value.len()
@@ -92,8 +98,7 @@ impl MqttHandler {
     ) -> Result<MqttEvent, ServerError> {
         match packet {
             Packet::Connect(p) => Ok(MqttEvent::ClientConnected {
-                client_id: ClientID::try_from(p.client_id)
-                    .map_err(|e| ServerError::StringError(e))?,
+                client_id: ClientID::try_from(p.client_id).map_err(ServerError::StringError)?,
             }),
             Packet::Disconnect(p) => Ok(MqttEvent::ClientDisconnected),
             Packet::Subscribe(p) => Ok(MqttEvent::ClientSubscribed {

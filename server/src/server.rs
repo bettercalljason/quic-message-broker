@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use mqttbytes::v5::{ConnAck, ConnAckProperties, ConnectReturnCode, Publish};
+use mqttbytes::v5::{ConnectReturnCode, Publish};
 use myprotocol::{ClientID, MqttEvent, MqttHandler, OutgoingMessage, ALPN_QUIC_HTTP};
 use rustls::server::WebPkiClientVerifier;
 use std::net::SocketAddr;
@@ -140,7 +140,7 @@ async fn handle_connection(
     server_state: Arc<ServerState>,
     handler: Arc<dyn ProtocolHandler + Send + Sync>,
 ) -> Result<(), ServerError> {
-    while let Ok((mut send_stream, mut recv_stream)) = conn.accept_bi().await {
+    while let Ok((send_stream, mut recv_stream)) = conn.accept_bi().await {
         let mut buf = BytesMut::new();
 
         // Expecting a CONNECT packet here...
@@ -230,23 +230,17 @@ async fn connection_task(
         let mut buf = BytesMut::new();
         match msg {
             OutgoingMessage::ConnAck(packet) => {
-                packet
-                    .write(&mut buf)
-                    .map_err(|e| ServerError::MqttError(e))?;
+                packet.write(&mut buf).map_err(ServerError::MqttError)?;
 
                 if packet.code == ConnectReturnCode::ProtocolError {
                     break;
                 }
             }
             OutgoingMessage::Publish(packet) => {
-                packet
-                    .write(&mut buf)
-                    .map_err(|e| ServerError::MqttError(e))?;
+                packet.write(&mut buf).map_err(ServerError::MqttError)?;
             }
             OutgoingMessage::PubAck(packet) => {
-                packet
-                    .write(&mut buf)
-                    .map_err(|e| ServerError::MqttError(e))?;
+                packet.write(&mut buf).map_err(ServerError::MqttError)?;
             }
         }
 
@@ -254,14 +248,14 @@ async fn connection_task(
         send_stream
             .write_all(&buf)
             .await
-            .map_err(|e| ServerError::QuinnWriteError(e))?;
+            .map_err(ServerError::QuinnWriteError)?;
     }
 
     // When the sender side is dropped (or client is removed), this loop ends.
     // We can close the connection gracefully here if needed.
     send_stream
         .finish()
-        .map_err(|e| ServerError::QuinnClosedStreamError(e))?;
+        .map_err(ServerError::QuinnClosedStreamError)?;
     info!("Connection task for {} closed", client_id);
 
     Ok(())
