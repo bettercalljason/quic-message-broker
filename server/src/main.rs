@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use server::{run_server, ServerConfig};
+use tracing::error;
 mod server;
 
 fn main() {
@@ -18,7 +19,7 @@ fn main() {
     let config = ServerConfig::parse();
     let code = {
         if let Err(e) = run(config) {
-            eprintln!("ERROR: {e}");
+            error!("ERROR: {e}");
             1
         } else {
             0

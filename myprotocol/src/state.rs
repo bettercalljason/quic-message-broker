@@ -2,6 +2,9 @@ use std::collections::HashMap;
 
 use mqttbytes::v5::{ConnAck, ConnAckProperties, ConnectReturnCode, PubAck, Publish};
 use tokio::sync::{mpsc, RwLock};
+use tracing::info;
+
+use crate::{ClientID, ServerError};
 
 // Represents per-connection outgoing messages
 pub enum OutgoingMessage {
@@ -11,7 +14,7 @@ pub enum OutgoingMessage {
 }
 
 pub struct ClientState {
-    pub client_id: String,
+    pub client_id: ClientID,
     // We use a Sender<OutgoingMessage> to push outgoing messages to this client
     sender: mpsc::Sender<OutgoingMessage>,
     pub subscribed_topics: Vec<(String, u8)>, // topic + QoS
@@ -19,7 +22,7 @@ pub struct ClientState {
 }
 
 pub struct ServerState {
-    clients: RwLock<HashMap<String, ClientState>>,
+    clients: RwLock<HashMap<ClientID, ClientState>>,
 }
 
 impl ServerState {
@@ -40,7 +43,30 @@ impl ServerState {
         result
     }
 
-    pub async fn add_client(&self, client_id: &str, sender: mpsc::Sender<OutgoingMessage>) {
+    pub async fn second_connect_error(&self, client_id: &ClientID) -> Result<(), ServerError> {
+        let mut map = self.clients.write().await;
+        if let Some(client) = map.get_mut(&client_id) {
+            client
+                .sender
+                .send(OutgoingMessage::ConnAck(ConnAck {
+                    code: ConnectReturnCode::ProtocolError,
+                    session_present: false,
+                    properties: None,
+                }))
+                .await
+                .map_err(|e| ServerError::SendError(e))?;
+
+            Ok(())
+        } else {
+            Err(ServerError::NoSuchClientError(client_id.clone()))
+        }
+    }
+
+    pub async fn add_client(
+        &self,
+        client_id: &ClientID,
+        sender: mpsc::Sender<OutgoingMessage>,
+    ) -> Result<(), ServerError> {
         // Send connack
         sender
             .send(OutgoingMessage::ConnAck(ConnAck {
@@ -48,49 +74,53 @@ impl ServerState {
                 session_present: false,
                 properties: Some(ConnAckProperties::new()),
             }))
-            .await;
+            .await
+            .map_err(|e| ServerError::SendError(e))?;
 
         let mut map = self.clients.write().await;
         map.insert(
-            client_id.to_string(),
+            client_id.clone(),
             ClientState {
-                client_id: client_id.to_string(),
+                client_id: client_id.clone(),
                 sender,
                 subscribed_topics: vec![],
             },
         );
+
+        Ok(())
     }
 
-    pub async fn remove_client(&self, client_id: &str) {
+    pub async fn remove_client(&self, client_id: &ClientID) {
         let mut map = self.clients.write().await;
         map.remove(client_id);
     }
 
-    pub async fn send_published_to_subscribed(&self, topic: &str, payload: Vec<u8>) {
-
-    }
+    pub async fn send_published_to_subscribed(&self, topic: &str, payload: Vec<u8>) {}
 
     pub async fn add_subscription(
         &self,
-        client_id: &String,
+        client_id: &ClientID,
         topic: &str,
         qos: u8,
     ) -> Result<(), String> {
         let mut map = self.clients.write().await;
-        if let Some(client) = map.get_mut(&client_id.to_string()) {
+        if let Some(client) = map.get_mut(&client_id) {
             // Check if already subscribed or just push new
             // For simplicity:
             client.subscribed_topics.push((topic.to_string(), qos));
 
-            client.sender.send(OutgoingMessage::PubAck(PubAck::new(1))).await;
+            client
+                .sender
+                .send(OutgoingMessage::PubAck(PubAck::new(1)))
+                .await;
 
             Ok(())
         } else {
-            Err(format!("No such client: {}", client_id))
+            Err(format!("No such client: {:?}", client_id))
         }
     }
 
-    pub async fn send_publish(&self, client_id: &str, publish: Publish) -> Result<(), String> {
+    pub async fn send_publish(&self, client_id: &ClientID, publish: Publish) -> Result<(), String> {
         let map = self.clients.read().await;
         if let Some(client) = map.get(client_id) {
             client

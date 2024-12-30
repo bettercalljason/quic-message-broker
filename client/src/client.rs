@@ -1,4 +1,5 @@
 use std::{
+    fmt::{self, Display},
     fs,
     io::{self, Write},
     net::SocketAddr,
@@ -11,7 +12,9 @@ use anyhow::Context;
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use clap::Parser;
-use myprotocol::{ServerError, ALPN_QUIC_HTTP};
+use inquire::Select;
+use mqttbytes::v5::DisconnectProperties;
+use myprotocol::{ClientID, MqttHandler, ProtocolHandler, ServerError, ALPN_QUIC_HTTP};
 use quinn::Endpoint;
 use quinn_proto::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -23,33 +26,36 @@ use tracing::info;
 pub struct ClientConfig {
     /// Perform NSS-compatible TLS key logging to the file specified in `SSLKEYLOGFILE`.
     #[clap(long = "keylog")]
-    keylog: bool,
+    pub keylog: bool,
 
     #[clap(default_value = "[::1]:4433")]
-    remote: SocketAddr,
+    pub remote: SocketAddr,
 
     /// Override hostname used for certificate verification
     #[clap(long = "host", default_value = "localhost")]
-    host: String,
+    pub host: String,
 
     /// Custom certificate authority to trust, in DER format
-    #[clap(long = "ca", default_value = "..\\tlsgen\\server\\cert.der")]
-    ca: PathBuf,
+    #[clap(
+        long = "ca",
+        default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\server\\cert.der"
+    )]
+    pub ca: PathBuf,
 
     /// Simulate NAT rebinding after connecting
     #[clap(long = "rebind")]
-    rebind: bool,
+    pub rebind: bool,
 
     /// Address to bind on
     #[clap(long = "bind", default_value = "[::]:0")]
-    bind: SocketAddr,
+    pub bind: SocketAddr,
 
     /// TLS private key in PEM format
     #[clap(
         short = 'k',
         long = "key",
         requires = "cert",
-        default_value = "..\\tlsgen\\client\\key.der"
+        default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\client\\key.der"
     )]
     pub key: PathBuf,
     /// TLS certificate in PEM format
@@ -57,9 +63,24 @@ pub struct ClientConfig {
         short = 'c',
         long = "cert",
         requires = "key",
-        default_value = "..\\tlsgen\\client\\cert.der"
+        default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\client\\cert.der"
     )]
     pub cert: PathBuf,
+}
+
+impl ClientPacket {
+    pub fn write(&self, buffer: &mut BytesMut) -> Result<usize, mqttbytes::Error> {
+        match self {
+            ClientPacket::Connect(p) => p.write(buffer),
+            ClientPacket::Disconnect(p) => p.write(buffer),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ClientPacket {
+    Connect(mqttbytes::v5::Connect),
+    Disconnect(mqttbytes::v5::Disconnect),
 }
 
 pub async fn run_client(config: ClientConfig) -> Result<()> {
@@ -85,50 +106,55 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
         endpoint.rebind(socket).expect("rebind failed");
     }
 
-    let connect_packet = mqttbytes::v5::Connect::new("bla");
-
-    let mut buf = BytesMut::new();
-    connect_packet
-        .write(&mut buf)
-        .map_err(|e| anyhow!("failed to send request: {}", e))?;
-
-    send.write_all(&buf).await?;
-
-    //send.finish().unwrap();
-    let response_start = Instant::now();
-    eprintln!("request sent at {:?}", response_start - start);
-
-    let mut tmp = BytesMut::new();
+    let mqtt_handler = MqttHandler::new(1024 * 1024);
 
     loop {
-        let resp = recv
-            .read_buf(&mut tmp)
-            .await
-            .map_err(|e| anyhow!("failed to read response: {}", e))?;
+        let options = vec!["CONNECT", "DISCONNECT", "PUBLISH", "SUBSCRIBE", "Abort"];
 
-        if resp == 0 {
-            break; // EOF
+        let ans = Select::new("Which MQTT packet do you want to send?", options).prompt()?;
+
+        let res = match ans {
+            "CONNECT" => Ok(ClientPacket::Connect(mqttbytes::v5::Connect::new(
+                ClientID::new(),
+            ))),
+            "DISCONNECT" => Ok(ClientPacket::Disconnect(mqttbytes::v5::Disconnect::new())),
+            "Abort" => break,
+            opt => Err(format!("Unhandled option {opt}")),
         }
+        .unwrap();
 
-        while let Some(packet) = match mqttbytes::v5::read(&mut tmp, 1024 * 1024) {
-            Ok(packet) => Ok(Some(packet)),
-            Err(mqttbytes::Error::InsufficientBytes(_)) => Ok(None),
-            Err(e) => Err(ServerError::MqttError(e)),
-        }? {
-            info!("Received packet: {:?}", packet);
-        }
+        println!("Sending {:?}", res);
 
-        let disconnect_packet = mqttbytes::v5::Disconnect::new();
-        disconnect_packet
-            .write(&mut buf)
+        let mut buf = BytesMut::new();
+        res.write(&mut buf)
             .map_err(|e| anyhow!("failed to send request: {}", e))?;
 
-        info!("Sent {:?}", disconnect_packet);
-
         send.write_all(&buf).await?;
+
+        let mut tmp = BytesMut::new();
+
+        'outer: loop {
+            let resp = recv
+                .read_buf(&mut tmp)
+                .await
+                .map_err(|e| anyhow!("failed to read response: {}", e))?;
+
+            // if resp == 0 {
+            //     break; // EOF
+            // }
+
+            while let Some(packet) = match mqtt_handler.read_patched(&mut tmp, 1024 * 1024) {
+                Ok(packet) => Ok(Some(packet)),
+                Err(mqttbytes::Error::InsufficientBytes(_)) => Ok(None),
+                Err(e) => Err(ServerError::MqttError(e)),
+            }? {
+                info!("Received packet: {:?}", packet);
+                break 'outer;
+            }
+        }
     }
 
-    io::stdout().flush().unwrap();
+    send.finish()?;
     conn.close(0u32.into(), b"done");
 
     // Give the server a fair chance to receive the close packet

@@ -1,6 +1,9 @@
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+
 use anyhow::Result;
 use clap::Parser;
 use client::{run_client, ClientConfig};
+use inquire::CustomType;
 
 mod client;
 
@@ -30,7 +33,17 @@ fn main() {
 
 #[tokio::main]
 async fn run(config: ClientConfig) -> Result<()> {
-    run_client(config).await?;
+    let remote = CustomType::<SocketAddr>::new("Enter broker address:")
+        .with_default(SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)),
+            4433,
+        ))
+        .prompt()
+        .unwrap();
+
+    let my_config = ClientConfig { remote, ..config };
+
+    run_client(my_config).await?;
 
     Ok(())
 }

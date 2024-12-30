@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use mqttbytes::v5::{ConnAck, ConnAckProperties, ConnectReturnCode, Publish};
-use myprotocol::{MqttEvent, MqttHandler, OutgoingMessage, ALPN_QUIC_HTTP};
+use myprotocol::{ClientID, MqttEvent, MqttHandler, OutgoingMessage, ALPN_QUIC_HTTP};
 use rustls::server::WebPkiClientVerifier;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -29,7 +29,7 @@ pub struct ServerConfig {
         short = 'k',
         long = "key",
         requires = "cert",
-        default_value = "..\\tlsgen\\server\\key.der"
+        default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\server\\key.der"
     )]
     pub key: PathBuf,
     /// TLS certificate in PEM format
@@ -37,11 +37,14 @@ pub struct ServerConfig {
         short = 'c',
         long = "cert",
         requires = "key",
-        default_value = "..\\tlsgen\\server\\cert.der"
+        default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\server\\cert.der"
     )]
     pub cert: PathBuf,
     /// TLS client certificate in PEM format to trust
-    #[clap(long = "client_cert", default_value = "..\\tlsgen\\client\\cert.der")]
+    #[clap(
+        long = "client_cert",
+        default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\client\\cert.der"
+    )]
     pub client_cert: PathBuf,
     /// Enable stateless retries
     #[clap(long = "stateless-retry")]
@@ -126,9 +129,7 @@ async fn accept_incoming(
         tokio::spawn(async move {
             handle_connection(new_conn, server_state, handler)
                 .await
-                .unwrap_or_else(|e| {
-                    todo!();
-                })
+                .unwrap_or_else(|e| error!("ERROR: {e}"));
         });
     }
     Ok(())
@@ -151,7 +152,7 @@ async fn handle_connection(
             break;
         }
 
-        let mut a_client_id: Option<String> = None;
+        let mut a_client_id: Option<ClientID> = None;
 
         let mut events = handler.handle_bytes(&mut buf, &server_state).await?;
 
@@ -166,11 +167,12 @@ async fn handle_connection(
             if let MqttEvent::ClientConnected { client_id } = event {
                 let (tx, rx) = mpsc::channel(100);
 
-                server_state.add_client(&client_id, tx).await;
+                server_state.add_client(&client_id, tx).await?;
                 a_client_id = Some(client_id.clone());
 
                 // Now you have full control over how you handle send_stream
                 let send_stream_for_task = send_stream;
+
                 tokio::spawn(async move {
                     if let Err(e) = connection_task(send_stream_for_task, rx, client_id).await {
                         error!("Connection task ended with error: {:?}", e);
@@ -180,21 +182,35 @@ async fn handle_connection(
         };
 
         if let Some(client_id) = a_client_id {
-            // Handle the rest of the events
-            for event in events {
-                match event {
-                    MqttEvent::ClientConnected { .. } => error!("Client already connected!"),
-                    MqttEvent::ClientDisconnected => {
-                        info!("Client {} disconnected", client_id);
-                        server_state.remove_client(&client_id).await;
-                    }
-                    MqttEvent::ClientSubscribed { topic, qos } => {
-                        server_state.add_subscription(&client_id, &topic, qos).await;
-                    }
-                    MqttEvent::PublishReceived { topic, payload } => {
-                        server_state.handle_publish(&Publish::new(topic, mqttbytes::QoS::AtLeastOnce, payload)).await;
+            loop {
+                // Handle the rest of the events
+                for event in events {
+                    info!("event: {:?}", event);
+                    match event {
+                        MqttEvent::ClientConnected { .. } => {
+                            server_state.second_connect_error(&client_id).await;
+                            server_state.remove_client(&client_id).await;
+                        }
+                        MqttEvent::ClientDisconnected => {
+                            info!("Client {} disconnected", client_id);
+                            server_state.remove_client(&client_id).await;
+                        }
+                        MqttEvent::ClientSubscribed { topic, qos } => {
+                            server_state.add_subscription(&client_id, &topic, qos).await;
+                        }
+                        MqttEvent::PublishReceived { topic, payload } => {
+                            server_state
+                                .handle_publish(&Publish::new(
+                                    topic,
+                                    mqttbytes::QoS::AtLeastOnce,
+                                    payload,
+                                ))
+                                .await?;
+                        }
                     }
                 }
+                let n = recv_stream.read_buf(&mut buf).await.unwrap_or(0);
+                events = handler.handle_bytes(&mut buf, &server_state).await?;
             }
         } else {
             panic!("No client ID")
@@ -206,7 +222,7 @@ async fn handle_connection(
 async fn connection_task(
     mut send_stream: SendStream,
     mut receiver: mpsc::Receiver<OutgoingMessage>,
-    client_id: String,
+    client_id: ClientID,
 ) -> Result<(), ServerError> {
     // This task runs per client connection.
     // It listens for OutgoingMessage from the receiver.
@@ -217,6 +233,10 @@ async fn connection_task(
                 packet
                     .write(&mut buf)
                     .map_err(|e| ServerError::MqttError(e))?;
+
+                if packet.code == ConnectReturnCode::ProtocolError {
+                    break;
+                }
             }
             OutgoingMessage::Publish(packet) => {
                 packet

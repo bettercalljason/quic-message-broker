@@ -1,11 +1,16 @@
 use quinn::{ClosedStream, WriteError};
+use tokio::sync::mpsc::{self, error::SendError};
+
+use crate::{ClientID, OutgoingMessage};
 
 #[derive(Debug)]
 pub enum ServerError {
     MqttError(mqttbytes::Error),
+    SendError(SendError<OutgoingMessage>),
+    NoSuchClientError(ClientID),
     QuinnWriteError(WriteError),
     QuinnClosedStreamError(ClosedStream),
-    // other variants
+    StringError(String), // other variants
 }
 
 impl std::error::Error for ServerError {}
