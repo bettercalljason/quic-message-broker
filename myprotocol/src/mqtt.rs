@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use bytes::BytesMut;
 use mqttbytes::{v5::*, PacketType};
@@ -12,7 +13,7 @@ use rand_chacha::ChaCha20Rng;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
-use crate::{error::ServerError, protocol::ProtocolHandler, state::ServerState, OutgoingMessage};
+use crate::{protocol::ProtocolHandler, state::ServerState, OutgoingMessage};
 
 #[derive(std::fmt::Debug)]
 pub enum MqttEvent {
@@ -62,22 +63,19 @@ impl From<ClientID> for String {
 
 /// According to MQTT-5.0-3.1.3.1
 impl TryFrom<String> for ClientID {
-    type Error = String;
+    type Error = anyhow::Error;
     fn try_from(value: String) -> Result<Self, Self::Error> {
         if value.is_empty() || value.len() > 23 {
-            return Err(format!(
+            Err(anyhow!(
                 "ClientID has invalid length: {}. Must be between 1 - 23 charaters.",
                 value.len()
-            ));
-        }
-
-        if (value.chars().all(|c| c.is_ascii_alphanumeric())) {
-            Ok(Self(value.to_string()))
-        } else {
-            Err(
+            ))
+        } else if !value.chars().all(|c| c.is_ascii_alphanumeric()) {
+            Err(anyhow!(
                 "ClientID contains invalid characters. Only alphanumeric characters are allowed."
-                    .to_string(),
-            )
+            ))
+        } else {
+            Ok(Self(value.to_string()))
         }
     }
 }
@@ -91,14 +89,10 @@ impl MqttHandler {
         MqttHandler { max_packet_size }
     }
 
-    fn handle_packet(
-        &self,
-        packet: Packet,
-        server_state: &Arc<ServerState>,
-    ) -> Result<MqttEvent, ServerError> {
+    fn handle_packet(&self, packet: Packet, server_state: &Arc<ServerState>) -> Result<MqttEvent> {
         match packet {
             Packet::Connect(p) => Ok(MqttEvent::ClientConnected {
-                client_id: ClientID::try_from(p.client_id).map_err(ServerError::StringError)?,
+                client_id: ClientID::try_from(p.client_id)?,
             }),
             Packet::Disconnect(p) => Ok(MqttEvent::ClientDisconnected),
             Packet::Subscribe(p) => Ok(MqttEvent::ClientSubscribed {
@@ -154,11 +148,11 @@ impl MqttHandler {
         Ok(packet)
     }
 
-    fn try_parse_packet(&self, buf: &mut BytesMut) -> Result<Option<Packet>, ServerError> {
+    fn try_parse_packet(&self, buf: &mut BytesMut) -> Result<Option<Packet>> {
         match self.read_patched(buf, self.max_packet_size) {
             Ok(packet) => Ok(Some(packet)),
             Err(mqttbytes::Error::InsufficientBytes(_)) => Ok(None),
-            Err(e) => Err(ServerError::MqttError(e)),
+            Err(e) => Err(anyhow!("Reading error: {:?}", e)),
         }
     }
 }
@@ -169,7 +163,7 @@ impl ProtocolHandler for MqttHandler {
         &self,
         buf: &mut BytesMut,
         server_state: &Arc<ServerState>,
-    ) -> Result<Vec<MqttEvent>, ServerError> {
+    ) -> Result<Vec<MqttEvent>> {
         let mut events = Vec::new();
 
         while let Some(packet) = self.try_parse_packet(buf)? {

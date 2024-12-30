@@ -5,7 +5,7 @@ use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use clap::Parser;
 use inquire::Select;
-use myprotocol::{ClientID, MqttHandler, ServerError, ALPN_QUIC_HTTP};
+use myprotocol::{ClientID, MqttHandler, ALPN_QUIC_HTTP};
 use quinn::Endpoint;
 use quinn_proto::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -60,11 +60,12 @@ pub struct ClientConfig {
 }
 
 impl ClientPacket {
-    pub fn write(&self, buffer: &mut BytesMut) -> Result<usize, mqttbytes::Error> {
+    pub fn write(&self, buffer: &mut BytesMut) -> Result<usize> {
         match self {
             ClientPacket::Connect(p) => p.write(buffer),
             ClientPacket::Disconnect(p) => p.write(buffer),
         }
+        .map_err(|e| anyhow!("Failed to write MQTT packet: {:?}", e))
     }
 }
 
@@ -80,12 +81,12 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
     let start = Instant::now();
     let rebind = config.rebind;
 
-    error!("connecting to {}", config.remote);
+    info!("connecting to {}", config.remote);
     let conn = endpoint
         .connect(config.remote, &config.host.clone())?
         .await
         .map_err(|e| anyhow!("failed to connect: {}", e))?;
-    error!("connected at {:?}", start.elapsed());
+    info!("connected at {:?}", start.elapsed());
     let (mut send, mut recv) = conn
         .open_bi()
         .await
@@ -93,7 +94,7 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
     if rebind {
         let socket = std::net::UdpSocket::bind("[::]:0").unwrap();
         let addr = socket.local_addr().unwrap();
-        error!("rebinding to {addr}");
+        info!("rebinding to {addr}");
         endpoint.rebind(socket).expect("rebind failed");
     }
 
@@ -117,17 +118,13 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
         info!("Sending {:?}", res);
 
         let mut buf = BytesMut::new();
-        res.write(&mut buf)
-            .map_err(|e| anyhow!("failed to send request: {}", e))?;
+        res.write(&mut buf)?;
 
         send.write_all(&buf).await?;
 
         let mut tmp = BytesMut::new();
 
-        let resp = recv
-            .read_buf(&mut tmp)
-            .await
-            .map_err(|e| anyhow!("failed to read response: {}", e))?;
+        let resp = recv.read_buf(&mut tmp).await?;
 
         if resp == 0 {
             continue; // EOF
@@ -136,7 +133,7 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
         while let Some(packet) = match mqtt_handler.read_patched(&mut tmp, 1024 * 1024) {
             Ok(packet) => Ok(Some(packet)),
             Err(mqttbytes::Error::InsufficientBytes(_)) => Ok(None),
-            Err(e) => Err(ServerError::MqttError(e)),
+            Err(e) => Err(anyhow!("failed to read MQTT packet: {:?}", e)),
         }? {
             info!("Received packet: {:?}", packet);
         }

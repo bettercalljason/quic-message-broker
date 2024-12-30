@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
 use clap::Parser;
 use mqttbytes::v5::{ConnectReturnCode, Publish};
 use myprotocol::{ClientID, MqttEvent, MqttHandler, OutgoingMessage, ALPN_QUIC_HTTP};
@@ -16,7 +16,7 @@ use quinn::{Connection, Endpoint, SendStream};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::io::AsyncReadExt;
 
-use myprotocol::{ProtocolHandler, ServerError, ServerState};
+use myprotocol::{ProtocolHandler, ServerState};
 
 #[derive(Parser, Debug)]
 #[clap(name = "server-config")]
@@ -119,15 +119,15 @@ async fn accept_incoming(
     endpoint: &Endpoint,
     server_state: Arc<ServerState>,
     handler: Arc<dyn ProtocolHandler + Send + Sync>,
-) -> Result<(), ServerError> {
+) -> Result<()> {
     while let Some(conn) = endpoint.accept().await {
-        let new_conn = conn.await.map_err(ServerError::QuinnConnectionError)?;
+        let new_conn = conn.await?;
         let server_state = server_state.clone();
         let handler = handler.clone();
         tokio::spawn(async move {
-            handle_connection(new_conn, server_state, handler)
-                .await
-                .unwrap_or_else(|e| error!("ERROR: {e}"));
+            if let Err(err) = handle_connection(new_conn, server_state, handler).await {
+                error!("Task failed: {:?}", err);
+            }
         });
     }
     Ok(())
@@ -137,7 +137,7 @@ async fn handle_connection(
     conn: Connection,
     server_state: Arc<ServerState>,
     handler: Arc<dyn ProtocolHandler + Send + Sync>,
-) -> Result<(), ServerError> {
+) -> Result<()> {
     while let Ok((send_stream, mut recv_stream)) = conn.accept_bi().await {
         let mut buf = BytesMut::new();
 
@@ -173,7 +173,7 @@ async fn handle_connection(
 
                 tokio::spawn(async move {
                     if let Err(e) = connection_task(send_stream_for_task, rx, client_id).await {
-                        error!("Connection task ended with error: {:?}", e);
+                        error!("Task failed: {:?}", e);
                     }
                 });
             }
@@ -194,7 +194,9 @@ async fn handle_connection(
                             server_state.remove_client(&client_id).await;
                         }
                         MqttEvent::ClientSubscribed { topic, qos } => {
-                            server_state.add_subscription(&client_id, &topic, qos).await?;
+                            server_state
+                                .add_subscription(&client_id, &topic, qos)
+                                .await?;
                         }
                         MqttEvent::PublishReceived { topic, payload } => {
                             server_state
@@ -215,7 +217,7 @@ async fn handle_connection(
                 events = handler.handle_bytes(&mut buf, &server_state).await?;
             }
         } else {
-            panic!("No client ID")
+            bail!("No client ID")
         }
     }
     Ok(())
@@ -225,39 +227,40 @@ async fn connection_task(
     mut send_stream: SendStream,
     mut receiver: mpsc::Receiver<OutgoingMessage>,
     client_id: ClientID,
-) -> Result<(), ServerError> {
+) -> Result<()> {
     // This task runs per client connection.
     // It listens for OutgoingMessage from the receiver.
     while let Some(msg) = receiver.recv().await {
         let mut buf = BytesMut::new();
         match msg {
             OutgoingMessage::ConnAck(packet) => {
-                packet.write(&mut buf).map_err(ServerError::MqttError)?;
+                packet
+                    .write(&mut buf)
+                    .map_err(|e| anyhow!("Failed to write MQTT packet: {:?}", e))?;
 
                 if packet.code == ConnectReturnCode::ProtocolError {
                     break;
                 }
             }
             OutgoingMessage::Publish(packet) => {
-                packet.write(&mut buf).map_err(ServerError::MqttError)?;
+                packet
+                    .write(&mut buf)
+                    .map_err(|e| anyhow!("Failed to write MQTT packet: {:?}", e))?;
             }
             OutgoingMessage::PubAck(packet) => {
-                packet.write(&mut buf).map_err(ServerError::MqttError)?;
+                packet
+                    .write(&mut buf)
+                    .map_err(|e| anyhow!("Failed to write MQTT packet: {:?}", e))?;
             }
         }
 
         // Write the serialized packet to the QUIC stream
-        send_stream
-            .write_all(&buf)
-            .await
-            .map_err(ServerError::QuinnWriteError)?;
+        send_stream.write_all(&buf).await?;
     }
 
     // When the sender side is dropped (or client is removed), this loop ends.
     // We can close the connection gracefully here if needed.
-    send_stream
-        .finish()
-        .map_err(ServerError::QuinnClosedStreamError)?;
+    send_stream.finish()?;
     info!("Connection task for {} closed", client_id);
 
     Ok(())

@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
+use anyhow::{anyhow, Result};
 use mqttbytes::v5::{ConnAck, ConnAckProperties, ConnectReturnCode, PubAck, Publish};
 use tokio::sync::{mpsc, RwLock};
 use tracing::info;
 
-use crate::{ClientID, ServerError};
+use crate::ClientID;
 
 // Represents per-connection outgoing messages
 pub enum OutgoingMessage {
@@ -49,7 +50,7 @@ impl ServerState {
         result
     }
 
-    pub async fn second_connect_error(&self, client_id: &ClientID) -> Result<(), ServerError> {
+    pub async fn second_connect_error(&self, client_id: &ClientID) -> Result<()> {
         let mut map = self.clients.write().await;
         if let Some(client) = map.get_mut(client_id) {
             client
@@ -59,12 +60,11 @@ impl ServerState {
                     session_present: false,
                     properties: None,
                 }))
-                .await
-                .map_err(ServerError::SendError)?;
+                .await?;
 
             Ok(())
         } else {
-            Err(ServerError::NoSuchClientError(client_id.clone()))
+            Err(anyhow!("No such client: {:?}", client_id))
         }
     }
 
@@ -72,7 +72,7 @@ impl ServerState {
         &self,
         client_id: &ClientID,
         sender: mpsc::Sender<OutgoingMessage>,
-    ) -> Result<(), ServerError> {
+    ) -> Result<()> {
         // Send connack
         sender
             .send(OutgoingMessage::ConnAck(ConnAck {
@@ -80,8 +80,7 @@ impl ServerState {
                 session_present: false,
                 properties: Some(ConnAckProperties::new()),
             }))
-            .await
-            .map_err(ServerError::SendError)?;
+            .await?;
 
         let mut map = self.clients.write().await;
         map.insert(
@@ -103,12 +102,7 @@ impl ServerState {
 
     pub async fn send_published_to_subscribed(&self, topic: &str, payload: Vec<u8>) {}
 
-    pub async fn add_subscription(
-        &self,
-        client_id: &ClientID,
-        topic: &str,
-        qos: u8,
-    ) -> Result<(), ServerError> {
+    pub async fn add_subscription(&self, client_id: &ClientID, topic: &str, qos: u8) -> Result<()> {
         let mut map = self.clients.write().await;
         if let Some(client) = map.get_mut(client_id) {
             // Check if already subscribed or just push new
@@ -122,7 +116,7 @@ impl ServerState {
 
             Ok(())
         } else {
-            Err(ServerError::StringError(format!("No such client: {:?}", client_id)))
+            Err(anyhow!("No such client: {:?}", client_id))
         }
     }
 
@@ -139,10 +133,7 @@ impl ServerState {
         }
     }
 
-    pub async fn handle_publish(
-        &self,
-        _publish_packet: &mqttbytes::v5::Publish,
-    ) -> Result<(), crate::error::ServerError> {
+    pub async fn handle_publish(&self, _publish_packet: &mqttbytes::v5::Publish) -> Result<()> {
         // Extract the topic from the publish packet
         let topic = &_publish_packet.topic;
 
