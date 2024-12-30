@@ -7,7 +7,10 @@ mod server;
 fn main() {
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or(tracing_subscriber::EnvFilter::new("trace")),
+            )
             .finish(),
     )
     .unwrap();

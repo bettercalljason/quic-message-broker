@@ -4,13 +4,17 @@ use anyhow::Result;
 use clap::Parser;
 use client::{run_client, ClientConfig};
 use inquire::CustomType;
+use tracing::error;
 
 mod client;
 
 fn main() {
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or(tracing_subscriber::EnvFilter::new("trace")),
+            )
             .finish(),
     )
     .unwrap();
@@ -22,7 +26,7 @@ fn main() {
     let config = ClientConfig::parse();
     let code = {
         if let Err(e) = run(config) {
-            eprintln!("ERROR: {e}");
+            error!("ERROR: {e}");
             1
         } else {
             0

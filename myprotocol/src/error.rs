@@ -1,4 +1,4 @@
-use quinn::{ClosedStream, WriteError};
+use quinn::{ClosedStream, ConnectionError, WriteError};
 use tokio::sync::mpsc::{self, error::SendError};
 
 use crate::{ClientID, OutgoingMessage};
@@ -10,6 +10,7 @@ pub enum ServerError {
     NoSuchClientError(ClientID),
     QuinnWriteError(WriteError),
     QuinnClosedStreamError(ClosedStream),
+    QuinnConnectionError(ConnectionError),
     StringError(String), // other variants
 }
 

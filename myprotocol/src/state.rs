@@ -108,7 +108,7 @@ impl ServerState {
         client_id: &ClientID,
         topic: &str,
         qos: u8,
-    ) -> Result<(), String> {
+    ) -> Result<(), ServerError> {
         let mut map = self.clients.write().await;
         if let Some(client) = map.get_mut(client_id) {
             // Check if already subscribed or just push new
@@ -122,7 +122,7 @@ impl ServerState {
 
             Ok(())
         } else {
-            Err(format!("No such client: {:?}", client_id))
+            Err(ServerError::StringError(format!("No such client: {:?}", client_id)))
         }
     }
 

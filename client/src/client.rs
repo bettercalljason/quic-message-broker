@@ -10,7 +10,7 @@ use quinn::Endpoint;
 use quinn_proto::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::io::AsyncReadExt;
-use tracing::info;
+use tracing::{error, info};
 
 #[derive(Parser, Debug)]
 #[clap(name = "client-config")]
@@ -80,12 +80,12 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
     let start = Instant::now();
     let rebind = config.rebind;
 
-    eprintln!("connecting to {}", config.remote);
+    error!("connecting to {}", config.remote);
     let conn = endpoint
         .connect(config.remote, &config.host.clone())?
         .await
         .map_err(|e| anyhow!("failed to connect: {}", e))?;
-    eprintln!("connected at {:?}", start.elapsed());
+    error!("connected at {:?}", start.elapsed());
     let (mut send, mut recv) = conn
         .open_bi()
         .await
@@ -93,7 +93,7 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
     if rebind {
         let socket = std::net::UdpSocket::bind("[::]:0").unwrap();
         let addr = socket.local_addr().unwrap();
-        eprintln!("rebinding to {addr}");
+        error!("rebinding to {addr}");
         endpoint.rebind(socket).expect("rebind failed");
     }
 
@@ -105,16 +105,16 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
         let ans = Select::new("Which MQTT packet do you want to send?", options).prompt()?;
 
         let res = match ans {
-            "CONNECT" => Ok(ClientPacket::Connect(mqttbytes::v5::Connect::new(
-                ClientID::new(),
-            ))),
-            "DISCONNECT" => Ok(ClientPacket::Disconnect(mqttbytes::v5::Disconnect::new())),
+            "CONNECT" => ClientPacket::Connect(mqttbytes::v5::Connect::new(ClientID::new())),
+            "DISCONNECT" => ClientPacket::Disconnect(mqttbytes::v5::Disconnect::new()),
             "Abort" => break,
-            opt => Err(format!("Unhandled option {opt}")),
-        }
-        .unwrap();
+            otherwise => {
+                error!("Unhandled option {otherwise}");
+                continue;
+            }
+        };
 
-        println!("Sending {:?}", res);
+        info!("Sending {:?}", res);
 
         let mut buf = BytesMut::new();
         res.write(&mut buf)
@@ -124,24 +124,21 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
 
         let mut tmp = BytesMut::new();
 
-        'outer: loop {
-            let resp = recv
-                .read_buf(&mut tmp)
-                .await
-                .map_err(|e| anyhow!("failed to read response: {}", e))?;
+        let resp = recv
+            .read_buf(&mut tmp)
+            .await
+            .map_err(|e| anyhow!("failed to read response: {}", e))?;
 
-            // if resp == 0 {
-            //     break; // EOF
-            // }
+        if resp == 0 {
+            continue; // EOF
+        }
 
-            while let Some(packet) = match mqtt_handler.read_patched(&mut tmp, 1024 * 1024) {
-                Ok(packet) => Ok(Some(packet)),
-                Err(mqttbytes::Error::InsufficientBytes(_)) => Ok(None),
-                Err(e) => Err(ServerError::MqttError(e)),
-            }? {
-                info!("Received packet: {:?}", packet);
-                break 'outer;
-            }
+        while let Some(packet) = match mqtt_handler.read_patched(&mut tmp, 1024 * 1024) {
+            Ok(packet) => Ok(Some(packet)),
+            Err(mqttbytes::Error::InsufficientBytes(_)) => Ok(None),
+            Err(e) => Err(ServerError::MqttError(e)),
+        }? {
+            info!("Received packet: {:?}", packet);
         }
     }
 

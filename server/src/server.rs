@@ -110,7 +110,7 @@ async fn setup_quic(config: ServerConfig) -> Result<Endpoint> {
     transport_config.max_concurrent_uni_streams(0_u8.into());
 
     let endpoint = quinn::Endpoint::server(server_config, config.listen)?;
-    eprintln!("listening on {}", endpoint.local_addr()?);
+    info!("listening on {}", endpoint.local_addr()?);
 
     Ok(endpoint)
 }
@@ -121,9 +121,7 @@ async fn accept_incoming(
     handler: Arc<dyn ProtocolHandler + Send + Sync>,
 ) -> Result<(), ServerError> {
     while let Some(conn) = endpoint.accept().await {
-        let new_conn = conn.await.map_err(|e| {
-            todo!();
-        })?;
+        let new_conn = conn.await.map_err(ServerError::QuinnConnectionError)?;
         let server_state = server_state.clone();
         let handler = handler.clone();
         tokio::spawn(async move {
@@ -149,7 +147,7 @@ async fn handle_connection(
 
         if n == 0 {
             // Stream closed (EOF)
-            break;
+            continue;
         }
 
         let mut a_client_id: Option<ClientID> = None;
@@ -188,7 +186,7 @@ async fn handle_connection(
                     info!("event: {:?}", event);
                     match event {
                         MqttEvent::ClientConnected { .. } => {
-                            server_state.second_connect_error(&client_id).await;
+                            server_state.second_connect_error(&client_id).await?;
                             server_state.remove_client(&client_id).await;
                         }
                         MqttEvent::ClientDisconnected => {
@@ -196,7 +194,7 @@ async fn handle_connection(
                             server_state.remove_client(&client_id).await;
                         }
                         MqttEvent::ClientSubscribed { topic, qos } => {
-                            server_state.add_subscription(&client_id, &topic, qos).await;
+                            server_state.add_subscription(&client_id, &topic, qos).await?;
                         }
                         MqttEvent::PublishReceived { topic, payload } => {
                             server_state
@@ -210,6 +208,10 @@ async fn handle_connection(
                     }
                 }
                 let n = recv_stream.read_buf(&mut buf).await.unwrap_or(0);
+                if n == 0 {
+                    events = vec![];
+                    continue; // EOF
+                }
                 events = handler.handle_bytes(&mut buf, &server_state).await?;
             }
         } else {
