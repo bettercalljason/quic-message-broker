@@ -193,16 +193,17 @@ async fn handle_connection(
                             info!("Client {} disconnected", client_id);
                             server_state.remove_client(&client_id).await;
                         }
-                        MqttEvent::ClientSubscribed { topic, qos } => {
-                            server_state
-                                .add_subscription(&client_id, &topic, qos)
-                                .await?;
+                        MqttEvent::ClientSubscribed { topic } => {
+                            server_state.add_subscription(&client_id, &topic).await?;
+                        }
+                        MqttEvent::ClientUnsubscribed { topic } => {
+                            server_state.remove_subscription(&client_id, &topic).await?;
                         }
                         MqttEvent::PublishReceived { topic, payload } => {
                             server_state
                                 .handle_publish(&Publish::new(
                                     topic,
-                                    mqttbytes::QoS::AtLeastOnce,
+                                    mqttbytes::QoS::AtMostOnce,
                                     payload,
                                 ))
                                 .await?;
@@ -243,11 +244,6 @@ async fn connection_task(
                 }
             }
             OutgoingMessage::Publish(packet) => {
-                packet
-                    .write(&mut buf)
-                    .map_err(|e| anyhow!("Failed to write MQTT packet: {:?}", e))?;
-            }
-            OutgoingMessage::PubAck(packet) => {
                 packet
                     .write(&mut buf)
                     .map_err(|e| anyhow!("Failed to write MQTT packet: {:?}", e))?;

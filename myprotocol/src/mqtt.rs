@@ -18,10 +18,10 @@ use crate::{protocol::ProtocolHandler, state::ServerState, OutgoingMessage};
 #[derive(std::fmt::Debug)]
 pub enum MqttEvent {
     ClientConnected { client_id: ClientID },
-    PublishReceived { topic: String, payload: Vec<u8> },
-    ClientSubscribed { topic: String, qos: u8 },
+    PublishReceived { topic: String, payload: String },
+    ClientSubscribed { topic: String },
+    ClientUnsubscribed { topic: String },
     ClientDisconnected,
-    // ... other events
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -95,10 +95,23 @@ impl MqttHandler {
                 client_id: ClientID::try_from(p.client_id)?,
             }),
             Packet::Disconnect(p) => Ok(MqttEvent::ClientDisconnected),
-            Packet::Subscribe(p) => Ok(MqttEvent::ClientSubscribed {
-                topic: "foo".to_string(),
-                qos: 1,
+            Packet::Publish(p) => Ok(MqttEvent::PublishReceived {
+                topic: p.topic,
+                payload: String::from_utf8(p.payload.to_vec()).expect("must be utf8 string"),
             }),
+            Packet::Subscribe(p) => {
+                let filter = p.filters.first().expect("filters should not be empty");
+
+                Ok(MqttEvent::ClientSubscribed {
+                    topic: filter.path.clone(),
+                })
+            }
+            Packet::Unsubscribe(p) => {
+                let filter = p.filters.first().expect("filters should not be empty");
+                Ok(MqttEvent::ClientUnsubscribed {
+                    topic: filter.to_string(),
+                })
+            }
             _ => todo!(),
         }
     }

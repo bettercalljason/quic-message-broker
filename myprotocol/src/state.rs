@@ -11,15 +11,13 @@ use crate::ClientID;
 pub enum OutgoingMessage {
     ConnAck(ConnAck),
     Publish(Publish),
-    PubAck(PubAck), // You can add more message types if needed
 }
 
 pub struct ClientState {
     pub client_id: ClientID,
     // We use a Sender<OutgoingMessage> to push outgoing messages to this client
     sender: mpsc::Sender<OutgoingMessage>,
-    pub subscribed_topics: Vec<(String, u8)>, // topic + QoS
-                                              // subscribed_topics, QoS info, etc.
+    pub subscribed_topics: Vec<String>,
 }
 
 pub struct ServerState {
@@ -43,7 +41,7 @@ impl ServerState {
         let map = self.clients.read().await;
         let mut result = Vec::new();
         for client in map.values() {
-            if client.subscribed_topics.iter().any(|(t, _)| t == topic) {
+            if client.subscribed_topics.iter().any(|t| t == topic) {
                 result.push(client.sender.clone());
             }
         }
@@ -102,17 +100,22 @@ impl ServerState {
 
     pub async fn send_published_to_subscribed(&self, topic: &str, payload: Vec<u8>) {}
 
-    pub async fn add_subscription(&self, client_id: &ClientID, topic: &str, qos: u8) -> Result<()> {
+    pub async fn add_subscription(&self, client_id: &ClientID, topic: &str) -> Result<()> {
         let mut map = self.clients.write().await;
         if let Some(client) = map.get_mut(client_id) {
-            // Check if already subscribed or just push new
-            // For simplicity:
-            client.subscribed_topics.push((topic.to_string(), qos));
+            // TODO: Check if already subscribed or just push new
+            client.subscribed_topics.push(topic.to_string());
 
-            client
-                .sender
-                .send(OutgoingMessage::PubAck(PubAck::new(1)))
-                .await;
+            Ok(())
+        } else {
+            Err(anyhow!("No such client: {:?}", client_id))
+        }
+    }
+
+    pub async fn remove_subscription(&self, client_id: &ClientID, topic: &str) -> Result<()> {
+        let mut map = self.clients.write().await;
+        if let Some(client) = map.get_mut(client_id) {
+            client.subscribed_topics.retain(|t| t != topic);
 
             Ok(())
         } else {
