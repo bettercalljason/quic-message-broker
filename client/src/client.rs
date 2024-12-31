@@ -1,10 +1,12 @@
+use core::fmt;
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 
 use anyhow::Context;
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use clap::Parser;
-use inquire::Select;
+use inquire::{Select, Text};
+use mqttbytes::QoS;
 use myprotocol::{ClientID, MqttHandler, ALPN_QUIC_HTTP};
 use quinn::Endpoint;
 use quinn_proto::crypto::rustls::QuicClientConfig;
@@ -64,8 +66,27 @@ impl ClientPacket {
         match self {
             ClientPacket::Connect(p) => p.write(buffer),
             ClientPacket::Disconnect(p) => p.write(buffer),
+            ClientPacket::Publish(p) => p.write(buffer),
+            ClientPacket::Subscribe(p) => p.write(buffer),
+            ClientPacket::Unsubscribe(p) => p.write(buffer),
         }
         .map_err(|e| anyhow!("Failed to write MQTT packet: {:?}", e))
+    }
+}
+
+#[derive(Debug)]
+enum PacketOpts {
+    Connect,
+    Disconnect,
+    Publish,
+    Subscribe,
+    Unsubscribe,
+    Exit,
+}
+
+impl fmt::Display for PacketOpts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
     }
 }
 
@@ -73,6 +94,9 @@ impl ClientPacket {
 enum ClientPacket {
     Connect(mqttbytes::v5::Connect),
     Disconnect(mqttbytes::v5::Disconnect),
+    Publish(mqttbytes::v5::Publish),
+    Subscribe(mqttbytes::v5::Subscribe),
+    Unsubscribe(mqttbytes::v5::Unsubscribe),
 }
 
 pub async fn run_client(config: ClientConfig) -> Result<()> {
@@ -101,24 +125,47 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
     let mqtt_handler = MqttHandler::new(1024 * 1024);
 
     loop {
-        let options = vec!["CONNECT", "DISCONNECT", "PUBLISH", "SUBSCRIBE", "Abort"];
+        let options = vec![
+            PacketOpts::Connect,
+            PacketOpts::Disconnect,
+            PacketOpts::Publish,
+            PacketOpts::Subscribe,
+            PacketOpts::Unsubscribe,
+            PacketOpts::Exit,
+        ];
 
         let ans = Select::new("Which MQTT packet do you want to send?", options).prompt()?;
 
         let res = match ans {
-            "CONNECT" => ClientPacket::Connect(mqttbytes::v5::Connect::new(ClientID::new())),
-            "DISCONNECT" => ClientPacket::Disconnect(mqttbytes::v5::Disconnect::new()),
-            "Abort" => break,
-            otherwise => {
-                error!("Unhandled option {otherwise}");
-                continue;
+            PacketOpts::Connect => {
+                ClientPacket::Connect(mqttbytes::v5::Connect::new(ClientID::new()))
             }
+            PacketOpts::Disconnect => ClientPacket::Disconnect(mqttbytes::v5::Disconnect::new()),
+            PacketOpts::Publish => {
+                let topic = Text::new("Topic:").with_default("mytopic").prompt()?;
+                let payload = Text::new("Payload:").with_default("Hello World").prompt()?;
+
+                ClientPacket::Publish(mqttbytes::v5::Publish::new(topic, QoS::AtMostOnce, payload))
+            }
+            PacketOpts::Subscribe => {
+                let path = Text::new("Path:").with_default("mytopic").prompt()?;
+                ClientPacket::Subscribe(mqttbytes::v5::Subscribe::new(path, QoS::AtMostOnce))
+            }
+            PacketOpts::Unsubscribe => {
+                let topic = Text::new("Topic:").with_default("mytopic").prompt()?;
+                ClientPacket::Unsubscribe(mqttbytes::v5::Unsubscribe::new(topic))
+            }
+            PacketOpts::Exit => break,
         };
 
         info!("Sending {:?}", res);
 
         let mut buf = BytesMut::new();
-        res.write(&mut buf)?;
+        let res = res.write(&mut buf);
+        if let Err(e) = res {
+            error!("{e}");
+            continue;
+        }
 
         send.write_all(&buf).await?;
 
