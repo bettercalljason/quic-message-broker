@@ -1,6 +1,7 @@
 use anyhow::{anyhow, bail, Result};
 use clap::Parser;
 use mqttbytes::v5::{ConnectReturnCode, Publish};
+use mqttbytes::QoS;
 use myprotocol::{ClientID, MqttEvent, MqttHandler, OutgoingMessage, ALPN_QUIC_HTTP};
 use rustls::server::WebPkiClientVerifier;
 use std::net::SocketAddr;
@@ -162,11 +163,17 @@ async fn handle_connection(
             let event = events.remove(pos);
 
             // Now handle the ClientConnected event seperatley
-            if let MqttEvent::ClientConnected { client_id } = event {
+            if let MqttEvent::ClientConnected {
+                client_id,
+                will_qos,
+            } = event
+            {
                 let (tx, rx) = mpsc::channel(100);
 
                 server_state.add_client(&client_id, tx).await?;
                 a_client_id = Some(client_id.clone());
+
+                let client_id_copy = client_id.clone();
 
                 // Now you have full control over how you handle send_stream
                 let send_stream_for_task = send_stream;
@@ -176,6 +183,15 @@ async fn handle_connection(
                         error!("Task failed: {:?}", e);
                     }
                 });
+
+                if let Some(will_qos) = will_qos {
+                    if will_qos > QoS::AtMostOnce {
+                        server_state
+                            .send_connack_with_qos_not_supported(&client_id_copy)
+                            .await?;
+                        // TODO: remove client and close connection
+                    }
+                }
             }
         };
 
@@ -188,6 +204,7 @@ async fn handle_connection(
                         MqttEvent::ClientConnected { .. } => {
                             server_state.second_connect_error(&client_id).await?;
                             server_state.remove_client(&client_id).await;
+                            // TODO: Close connection
                         }
                         MqttEvent::ClientDisconnected => {
                             info!("Client {} disconnected", client_id);
@@ -199,14 +216,19 @@ async fn handle_connection(
                         MqttEvent::ClientUnsubscribed { topic } => {
                             server_state.remove_subscription(&client_id, &topic).await?;
                         }
-                        MqttEvent::PublishReceived { topic, payload } => {
-                            server_state
+                        MqttEvent::PublishReceived { topic, payload, qos } => {
+                            if(qos > QoS::AtMostOnce) {
+                                server_state.send_disconnect_with_qos_not_supported(&client_id);
+                            } else {
+                                server_state
                                 .handle_publish(&Publish::new(
                                     topic,
                                     mqttbytes::QoS::AtMostOnce,
                                     payload,
                                 ))
                                 .await?;
+                            }
+ 
                         }
                     }
                 }

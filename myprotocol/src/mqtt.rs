@@ -6,21 +6,32 @@ use std::{
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use bytes::BytesMut;
-use mqttbytes::{v5::*, PacketType};
+use mqttbytes::{v5::*, PacketType, QoS};
 use quinn::SendStream;
 use rand::{distributions::Alphanumeric, rngs::OsRng, thread_rng, Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::{protocol::ProtocolHandler, state::ServerState, OutgoingMessage};
 
 #[derive(std::fmt::Debug)]
 pub enum MqttEvent {
-    ClientConnected { client_id: ClientID },
-    PublishReceived { topic: String, payload: String },
-    ClientSubscribed { topic: String },
-    ClientUnsubscribed { topic: String },
+    ClientConnected {
+        client_id: ClientID,
+        will_qos: Option<QoS>,
+    },
+    PublishReceived {
+        topic: String,
+        payload: String,
+        qos: QoS
+    },
+    ClientSubscribed {
+        topic: String,
+    },
+    ClientUnsubscribed {
+        topic: String,
+    },
     ClientDisconnected,
 }
 
@@ -93,12 +104,22 @@ impl MqttHandler {
         match packet {
             Packet::Connect(p) => Ok(MqttEvent::ClientConnected {
                 client_id: ClientID::try_from(p.client_id)?,
+                will_qos: p.last_will.and_then(|v| Some(v.qos)),
             }),
             Packet::Disconnect(p) => Ok(MqttEvent::ClientDisconnected),
-            Packet::Publish(p) => Ok(MqttEvent::PublishReceived {
-                topic: p.topic,
-                payload: String::from_utf8(p.payload.to_vec()).expect("must be utf8 string"),
-            }),
+            Packet::Publish(p) => {
+                if p.qos != QoS::AtMostOnce {
+                    // warn!(
+                    //     "Currently, only {} is supported. Every other setting will be ignore",
+                    //     QoS::AtMostOnce
+                    // );
+                }
+                Ok(MqttEvent::PublishReceived {
+                    topic: p.topic,
+                    payload: String::from_utf8(p.payload.to_vec()).expect("must be utf8 string"),
+                    qos: p.qos
+                })
+            }
             Packet::Subscribe(p) => {
                 let filter = p.filters.first().expect("filters should not be empty");
 

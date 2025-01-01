@@ -1,5 +1,5 @@
 # Tasks
-- [ ] Interactive CLI client
+- [x] Interactive CLI client
 - [ ] Implement Pub/Sub
 - [ ] Implement authorization with ACL
 - [ ] Add WebTransport/H3 Layer

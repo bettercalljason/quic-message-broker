@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
-use mqttbytes::v5::{ConnAck, ConnAckProperties, ConnectReturnCode, PubAck, Publish};
+use mqttbytes::{
+    v5::{ConnAck, ConnAckProperties, ConnectReturnCode, Disconnect, PubAck, Publish},
+    QoS,
+};
 use tokio::sync::{mpsc, RwLock};
 use tracing::info;
 
@@ -10,6 +13,7 @@ use crate::ClientID;
 // Represents per-connection outgoing messages
 pub enum OutgoingMessage {
     ConnAck(ConnAck),
+    Disconnect(Disconnect),
     Publish(Publish),
 }
 
@@ -51,12 +55,59 @@ impl ServerState {
     pub async fn second_connect_error(&self, client_id: &ClientID) -> Result<()> {
         let mut map = self.clients.write().await;
         if let Some(client) = map.get_mut(client_id) {
+            let mut properties = ConnAckProperties::new();
+            properties.max_qos = Some(0); // At most once
+            let properties = properties;
+
             client
                 .sender
                 .send(OutgoingMessage::ConnAck(ConnAck {
                     code: ConnectReturnCode::ProtocolError,
                     session_present: false,
+                    properties: Some(properties),
+                }))
+                .await?;
+
+            Ok(())
+        } else {
+            Err(anyhow!("No such client: {:?}", client_id))
+        }
+    }
+
+    pub async fn send_connack_with_qos_not_supported(&self, client_id: &ClientID) -> Result<()> {
+        let mut map = self.clients.write().await;
+        if let Some(client) = map.get_mut(client_id) {
+            let mut properties = ConnAckProperties::new();
+            properties.max_qos = Some(0); // At most once
+            let properties = properties;
+
+            client
+                .sender
+                .send(OutgoingMessage::ConnAck(ConnAck {
+                    code: ConnectReturnCode::QoSNotSupported,
+                    session_present: false,
+                    properties: Some(properties),
+                }))
+                .await?;
+
+            Ok(())
+        } else {
+            Err(anyhow!("No such client: {:?}", client_id))
+        }
+    }
+
+    pub async fn send_disconnect_with_qos_not_supported(&self, client_id: &ClientID) -> Result<()> {
+        let mut map = self.clients.write().await;
+        if let Some(client) = map.get_mut(client_id) {
+            let mut properties = ConnAckProperties::new();
+            properties.max_qos = Some(0); // At most once
+            let properties = properties;
+
+            client
+                .sender
+                .send(OutgoingMessage::Disconnect(Disconnect {
                     properties: None,
+                    reason_code: mqttbytes::v5::DisconnectReasonCode::QoSNotSupported,
                 }))
                 .await?;
 
@@ -71,12 +122,15 @@ impl ServerState {
         client_id: &ClientID,
         sender: mpsc::Sender<OutgoingMessage>,
     ) -> Result<()> {
-        // Send connack
+        let mut properties = ConnAckProperties::new();
+        properties.max_qos = Some(0); // At most once
+        let properties = properties;
+
         sender
             .send(OutgoingMessage::ConnAck(ConnAck {
                 code: ConnectReturnCode::Success,
                 session_present: false,
-                properties: Some(ConnAckProperties::new()),
+                properties: Some(properties),
             }))
             .await?;
 
