@@ -1,6 +1,10 @@
-use anyhow::Result;
+use std::fmt;
+
+use anyhow::{anyhow, Result};
 use bytes::{BufMut, BytesMut};
 use mqttbytes::{v5::*, PacketType};
+use rand::{distributions::Alphanumeric, Rng, SeedableRng};
+use rand_chacha::ChaCha20Rng;
 use tracing::{info, warn};
 
 pub struct MqttCodec {
@@ -33,46 +37,66 @@ impl MqttCodec {
     }
 
     pub fn decode(&self, buffer: &mut BytesMut) -> Result<Option<Packet>> {
-        match self.read_patched(buffer, self.max_packet_size) {
+        match read(buffer, self.max_packet_size) {
             Ok(packet) => Ok(Some(packet)),
             Err(mqttbytes::Error::InsufficientBytes(_)) => Ok(None), // Partial data, wait for more
             Err(e) => Err(anyhow::anyhow!(e)),
         }
     }
+}
 
-    /// Reads a stream of bytes and extracts next MQTT packet out of it
-    /// Patched version of mqttbytes::v5::read, because that one did not accept Disconnects without payload
-    fn read_patched(
-        &self,
-        stream: &mut BytesMut,
-        max_size: usize,
-    ) -> Result<Packet, mqttbytes::Error> {
-        let fixed_header = mqttbytes::check(stream.iter(), max_size)?;
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct ClientID(String);
 
-        // Test with a stream with exactly the size to check border panics
-        let packet = stream.split_to(fixed_header.frame_length());
-        let packet_type = fixed_header.packet_type()?;
+impl Default for ClientID {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-        let packet = packet.freeze();
-        let packet = match packet_type {
-            PacketType::Connect => Packet::Connect(Connect::read(fixed_header, packet)?),
-            PacketType::ConnAck => Packet::ConnAck(ConnAck::read(fixed_header, packet)?),
-            PacketType::Publish => Packet::Publish(Publish::read(fixed_header, packet)?),
-            PacketType::PubAck => Packet::PubAck(PubAck::read(fixed_header, packet)?),
-            PacketType::PubRec => Packet::PubRec(PubRec::read(fixed_header, packet)?),
-            PacketType::PubRel => Packet::PubRel(PubRel::read(fixed_header, packet)?),
-            PacketType::PubComp => Packet::PubComp(PubComp::read(fixed_header, packet)?),
-            PacketType::Subscribe => Packet::Subscribe(Subscribe::read(fixed_header, packet)?),
-            PacketType::SubAck => Packet::SubAck(SubAck::read(fixed_header, packet)?),
-            PacketType::Unsubscribe => {
-                Packet::Unsubscribe(Unsubscribe::read(fixed_header, packet)?)
-            }
-            PacketType::UnsubAck => Packet::UnsubAck(UnsubAck::read(fixed_header, packet)?),
-            PacketType::PingReq => Packet::PingReq,
-            PacketType::PingResp => Packet::PingResp,
-            PacketType::Disconnect => Packet::Disconnect(Disconnect::read(fixed_header, packet)?),
-        };
+impl ClientID {
+    pub fn new() -> Self {
+        let mut rng = ChaCha20Rng::from_entropy();
+        let random_id = rng
+            .sample_iter(&Alphanumeric)
+            .take(23)
+            .map(char::from)
+            .collect();
+        Self(random_id)
+    }
 
-        Ok(packet)
+    pub fn get(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ClientID {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ClientID {}", self.0)
+    }
+}
+
+impl From<ClientID> for String {
+    fn from(client_id: ClientID) -> Self {
+        client_id.0
+    }
+}
+
+/// According to MQTT-5.0-3.1.3.1
+impl TryFrom<String> for ClientID {
+    type Error = anyhow::Error;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.is_empty() || value.len() > 23 {
+            Err(anyhow!(
+                "ClientID has invalid length: {}. Must be between 1 - 23 charaters.",
+                value.len()
+            ))
+        } else if !value.chars().all(|c| c.is_ascii_alphanumeric()) {
+            Err(anyhow!(
+                "ClientID contains invalid characters. Only alphanumeric characters are allowed."
+            ))
+        } else {
+            Ok(Self(value.to_string()))
+        }
     }
 }
