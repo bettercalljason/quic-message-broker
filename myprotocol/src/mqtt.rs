@@ -24,7 +24,7 @@ pub enum MqttEvent {
     PublishReceived {
         topic: String,
         payload: String,
-        qos: QoS
+        qos: QoS,
     },
     ClientSubscribed {
         topic: String,
@@ -104,7 +104,7 @@ impl MqttHandler {
         match packet {
             Packet::Connect(p) => Ok(MqttEvent::ClientConnected {
                 client_id: ClientID::try_from(p.client_id)?,
-                will_qos: p.last_will.and_then(|v| Some(v.qos)),
+                will_qos: p.last_will.map(|v| v.qos),
             }),
             Packet::Disconnect(p) => Ok(MqttEvent::ClientDisconnected),
             Packet::Publish(p) => {
@@ -117,7 +117,7 @@ impl MqttHandler {
                 Ok(MqttEvent::PublishReceived {
                     topic: p.topic,
                     payload: String::from_utf8(p.payload.to_vec()).expect("must be utf8 string"),
-                    qos: p.qos
+                    qos: p.qos,
                 })
             }
             Packet::Subscribe(p) => {

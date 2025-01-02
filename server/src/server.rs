@@ -1,23 +1,21 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::Result;
 use clap::Parser;
-use mqttbytes::v5::{ConnectReturnCode, Publish};
 use mqttbytes::QoS;
-use myprotocol::{ClientID, MqttEvent, MqttHandler, OutgoingMessage, ALPN_QUIC_HTTP};
+use myprotocol::{MqttProtocol, QuicTransport, ALPN_QUIC_HTTP};
 use rustls::server::WebPkiClientVerifier;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::{fs, sync::Arc};
-use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 use tracing::{error, info};
 
 use anyhow::Context;
-use bytes::BytesMut;
 use quinn::crypto::rustls::QuicServerConfig;
-use quinn::{Connection, Endpoint, SendStream};
+use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use tokio::io::AsyncReadExt;
 
-use myprotocol::{ProtocolHandler, ServerState};
+use crate::handler::{BrokerConfig, PacketHandler};
+use crate::state::ServerState;
 
 #[derive(Parser, Debug)]
 #[clap(name = "server-config")]
@@ -62,13 +60,14 @@ pub struct ServerConfig {
 }
 
 pub async fn run_server(config: ServerConfig) -> Result<()> {
-    // Initialize your server state
-    let server_state = Arc::new(ServerState::new());
+    let state = Arc::new(Mutex::new(ServerState::new()));
 
-    let mqtt_handler = Arc::new(MqttHandler::new(1024 * 1024));
+    let config2 = Arc::new(BrokerConfig {
+        max_qos: QoS::AtMostOnce,
+    });
 
     let endpoint = setup_quic(config).await?;
-    accept_incoming(&endpoint, server_state, mqtt_handler).await?;
+    accept_incoming(&endpoint, state, config2).await?;
     endpoint.wait_idle().await;
 
     Ok(())
@@ -111,23 +110,23 @@ async fn setup_quic(config: ServerConfig) -> Result<Endpoint> {
     transport_config.max_concurrent_uni_streams(0_u8.into());
 
     let endpoint = quinn::Endpoint::server(server_config, config.listen)?;
-    info!("listening on {}", endpoint.local_addr()?);
+    info!("Listening on {}", endpoint.local_addr()?);
 
     Ok(endpoint)
 }
 
 async fn accept_incoming(
     endpoint: &Endpoint,
-    server_state: Arc<ServerState>,
-    handler: Arc<dyn ProtocolHandler + Send + Sync>,
+    state: Arc<Mutex<ServerState>>,
+    config: Arc<BrokerConfig>,
 ) -> Result<()> {
     while let Some(conn) = endpoint.accept().await {
         let new_conn = conn.await?;
-        let server_state = server_state.clone();
-        let handler = handler.clone();
+        let state = state.clone();
+        let config = config.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_connection(new_conn, server_state, handler).await {
-                error!("Task failed: {:?}", err);
+            if let Err(err) = handle_connection(new_conn, state, config).await {
+                error!("Error handling connection: {:?}", err);
             }
         });
     }
@@ -136,150 +135,74 @@ async fn accept_incoming(
 
 async fn handle_connection(
     conn: Connection,
-    server_state: Arc<ServerState>,
-    handler: Arc<dyn ProtocolHandler + Send + Sync>,
+    state: Arc<Mutex<ServerState>>,
+    config: Arc<BrokerConfig>,
 ) -> Result<()> {
-    while let Ok((send_stream, mut recv_stream)) = conn.accept_bi().await {
-        let mut buf = BytesMut::new();
+    while let Ok((send_stream, recv_stream)) = conn.accept_bi().await {
+        let state: Arc<Mutex<ServerState>> = state.clone();
+        let config = config.clone();
 
-        // Expecting a CONNECT packet here...
-        // Read data from recv_stream
-        let n = recv_stream.read_buf(&mut buf).await.unwrap_or(0);
-
-        if n == 0 {
-            // Stream closed (EOF)
-            continue;
-        }
-
-        let mut a_client_id: Option<ClientID> = None;
-
-        let mut events = handler.handle_bytes(&mut buf, &server_state).await?;
-
-        if let Some(pos) = events
-            .iter()
-            .position(|e| matches!(e, MqttEvent::ClientConnected { .. }))
-        {
-            // Remove the event from the vector
-            let event = events.remove(pos);
-
-            // Now handle the ClientConnected event seperatley
-            if let MqttEvent::ClientConnected {
-                client_id,
-                will_qos,
-            } = event
-            {
-                let (tx, rx) = mpsc::channel(100);
-
-                server_state.add_client(&client_id, tx).await?;
-                a_client_id = Some(client_id.clone());
-
-                let client_id_copy = client_id.clone();
-
-                // Now you have full control over how you handle send_stream
-                let send_stream_for_task = send_stream;
-
-                tokio::spawn(async move {
-                    if let Err(e) = connection_task(send_stream_for_task, rx, client_id).await {
-                        error!("Task failed: {:?}", e);
-                    }
-                });
-
-                if let Some(will_qos) = will_qos {
-                    if will_qos > QoS::AtMostOnce {
-                        server_state
-                            .send_connack_with_qos_not_supported(&client_id_copy)
-                            .await?;
-                        // TODO: remove client and close connection
-                    }
-                }
+        tokio::spawn(async move {
+            if let Err(e) = handle_stream(send_stream, recv_stream, state, config).await {
+                error!("Error handling stream: {:?}", e);
             }
-        };
-
-        if let Some(client_id) = a_client_id {
-            loop {
-                // Handle the rest of the events
-                for event in events {
-                    info!("event: {:?}", event);
-                    match event {
-                        MqttEvent::ClientConnected { .. } => {
-                            server_state.second_connect_error(&client_id).await?;
-                            server_state.remove_client(&client_id).await;
-                            // TODO: Close connection
-                        }
-                        MqttEvent::ClientDisconnected => {
-                            info!("Client {} disconnected", client_id);
-                            server_state.remove_client(&client_id).await;
-                        }
-                        MqttEvent::ClientSubscribed { topic } => {
-                            server_state.add_subscription(&client_id, &topic).await?;
-                        }
-                        MqttEvent::ClientUnsubscribed { topic } => {
-                            server_state.remove_subscription(&client_id, &topic).await?;
-                        }
-                        MqttEvent::PublishReceived { topic, payload, qos } => {
-                            if(qos > QoS::AtMostOnce) {
-                                server_state.send_disconnect_with_qos_not_supported(&client_id);
-                            } else {
-                                server_state
-                                .handle_publish(&Publish::new(
-                                    topic,
-                                    mqttbytes::QoS::AtMostOnce,
-                                    payload,
-                                ))
-                                .await?;
-                            }
- 
-                        }
-                    }
-                }
-                let n = recv_stream.read_buf(&mut buf).await.unwrap_or(0);
-                if n == 0 {
-                    events = vec![];
-                    continue; // EOF
-                }
-                events = handler.handle_bytes(&mut buf, &server_state).await?;
-            }
-        } else {
-            bail!("No client ID")
-        }
+        });
     }
     Ok(())
 }
 
-async fn connection_task(
-    mut send_stream: SendStream,
-    mut receiver: mpsc::Receiver<OutgoingMessage>,
-    client_id: ClientID,
+async fn handle_stream(
+    send: SendStream,
+    recv: RecvStream,
+    state: Arc<Mutex<ServerState>>,
+    config: Arc<BrokerConfig>,
 ) -> Result<()> {
-    // This task runs per client connection.
-    // It listens for OutgoingMessage from the receiver.
-    while let Some(msg) = receiver.recv().await {
-        let mut buf = BytesMut::new();
-        match msg {
-            OutgoingMessage::ConnAck(packet) => {
-                packet
-                    .write(&mut buf)
-                    .map_err(|e| anyhow!("Failed to write MQTT packet: {:?}", e))?;
+    let transport = QuicTransport::new(send, recv);
+    let mut protocol = MqttProtocol::new(transport);
 
-                if packet.code == ConnectReturnCode::ProtocolError {
+    let packet = protocol.recv_packet().await?;
+    let mut state_first = state.lock().await;
+    let (client_id, response, should_close) =
+        PacketHandler::process_first_packet(packet, &config, &mut state_first).await?;
+
+    if let Some(response) = response {
+        protocol.send_packet(response).await?;
+    }
+
+    if should_close {
+        protocol.close_connection().await?;
+        return Ok(());
+    }
+
+    if let Some(client_id) = client_id {
+        // Subsequent packets
+        loop {
+            match protocol.recv_packet().await {
+                Ok(packet) => {
+                    let mut state = state.lock().await;
+                    let (response, should_close) =
+                        PacketHandler::process_packet(packet, &config, &mut state, &client_id)
+                            .await?;
+
+                    info!("{:?} {should_close}", response);
+
+                    if let Some(response) = response {
+                        protocol.send_packet(response).await?;
+                    }
+
+                    if should_close {
+                        protocol.close_connection().await?;
+                        break;
+                    }
+                }
+                Err(e) => {
+                    error!("Error handling packet: {:?}", e);
                     break;
                 }
             }
-            OutgoingMessage::Publish(packet) => {
-                packet
-                    .write(&mut buf)
-                    .map_err(|e| anyhow!("Failed to write MQTT packet: {:?}", e))?;
-            }
+            info!("Processing iteration end");
         }
-
-        // Write the serialized packet to the QUIC stream
-        send_stream.write_all(&buf).await?;
     }
-
-    // When the sender side is dropped (or client is removed), this loop ends.
-    // We can close the connection gracefully here if needed.
-    send_stream.finish()?;
-    info!("Connection task for {} closed", client_id);
 
     Ok(())
 }
