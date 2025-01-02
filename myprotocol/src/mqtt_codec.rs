@@ -29,8 +29,6 @@ impl MqttCodec {
         }
         .map_err(|e| anyhow::anyhow!(e))?;
 
-        info!("Bytes written: {}", n);
-
         Ok(buffer.to_vec())
     }
 
@@ -51,13 +49,9 @@ impl MqttCodec {
     ) -> Result<Packet, mqttbytes::Error> {
         let fixed_header = mqttbytes::check(stream.iter(), max_size)?;
 
-        info!("Header: {:?}", fixed_header);
-
         // Test with a stream with exactly the size to check border panics
         let packet = stream.split_to(fixed_header.frame_length());
         let packet_type = fixed_header.packet_type()?;
-
-        info!("PacketType: {:?}", packet_type);
 
         let packet = packet.freeze();
         let packet = match packet_type {

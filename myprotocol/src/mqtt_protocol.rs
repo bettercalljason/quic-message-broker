@@ -26,7 +26,6 @@ impl<T: Transport> MqttProtocol<T> {
     pub async fn send_packet(&mut self, packet: Packet) -> Result<()> {
         info!("Sending packet {:?}", packet);
         let encoded = self.codec.encode(&packet)?;
-        info!("Sending encoded {:?}", encoded);
         self.transport.send(&encoded).await
     }
 
@@ -38,7 +37,6 @@ impl<T: Transport> MqttProtocol<T> {
             }
 
             let chunk = self.transport.recv().await?;
-            info!("Received chunk: {:?}", chunk);
             self.buffer.extend_from_slice(&chunk);
         }
     }

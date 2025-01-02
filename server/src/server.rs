@@ -161,17 +161,22 @@ async fn handle_stream(
     let mut protocol = MqttProtocol::new(transport);
 
     let packet = protocol.recv_packet().await?;
-    let mut state_first = state.lock().await;
-    let (client_id, response, should_close) =
-        PacketHandler::process_first_packet(packet, &config, &mut state_first).await?;
+    let client_id;
+    {
+        let mut state_first = state.lock().await;
+        let (inner_client_id, response, should_close) =
+            PacketHandler::process_first_packet(packet, &config, &mut state_first).await?;
 
-    if let Some(response) = response {
-        protocol.send_packet(response).await?;
-    }
+        client_id = inner_client_id;
 
-    if should_close {
-        protocol.close_connection().await?;
-        return Ok(());
+        if let Some(response) = response {
+            protocol.send_packet(response).await?;
+        }
+
+        if should_close {
+            protocol.close_connection().await?;
+            return Ok(());
+        }
     }
 
     if let Some(client_id) = client_id {
@@ -179,7 +184,9 @@ async fn handle_stream(
         loop {
             match protocol.recv_packet().await {
                 Ok(packet) => {
+                    info!("Before");
                     let mut state = state.lock().await;
+                    info!("After");
                     let (response, should_close) =
                         PacketHandler::process_packet(packet, &config, &mut state, &client_id)
                             .await?;

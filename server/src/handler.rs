@@ -18,7 +18,9 @@ impl PacketHandler {
     ) -> Result<(Option<ClientID>, Option<Packet>, bool)> {
         match packet {
             Packet::Connect(connect) => Self::process_connect(connect, config.max_qos, state),
-            _ => Self::handle_invalid_packet().map(|(packet, disconnect)| (None, packet, disconnect)),
+            _ => {
+                Self::handle_invalid_packet().map(|(packet, disconnect)| (None, packet, disconnect))
+            }
         }
     }
 
@@ -73,11 +75,7 @@ impl PacketHandler {
 
         state.add_client(&client_id);
 
-        let response = Packet::ConnAck(ConnAck {
-            session_present: false,
-            code: ConnectReturnCode::Success,
-            properties: None,
-        });
+        let response = Packet::ConnAck(ConnAck::new(ConnectReturnCode::Success, false));
         Ok((Some(client_id), Some(response), false))
     }
 
