@@ -2,7 +2,7 @@ use crate::state::ServerState;
 use anyhow::Result;
 use mqttbytes::{v5::*, QoS};
 use myprotocol::ClientID;
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{info, warn};
 
 pub struct BrokerConfig {
@@ -16,7 +16,7 @@ impl PacketHandler {
         packet: Packet,
         config: &BrokerConfig,
         state: &ServerState,
-    ) -> Result<Option<(ClientID, Receiver<Packet>)>> {
+    ) -> Result<Option<(ClientID, Sender<Packet>, Receiver<Packet>)>> {
         match packet {
             Packet::Connect(connect) => Self::process_connect(connect, config.max_qos, state).await,
             _ => Ok(None),
@@ -28,26 +28,29 @@ impl PacketHandler {
         config: &BrokerConfig,
         state: &ServerState,
         client_id: &ClientID,
-    ) -> Result<(Option<Packet>, bool)> {
+        sender: &Sender<Packet>,
+    ) -> Result<bool> {
         info!("Processing: {:?}", packet);
         match packet {
-            Packet::Connect(_) => Self::handle_invalid_packet(),
-            Packet::ConnAck(_) => Self::handle_invalid_packet(),
-            Packet::Publish(publish) => Self::process_publish(publish, state, config.max_qos).await,
-            Packet::PubAck(_) => Self::handle_invalid_packet(),
-            Packet::PubRec(_) => Self::handle_invalid_packet(),
-            Packet::PubRel(_) => Self::handle_invalid_packet(),
-            Packet::PubComp(_) => Self::handle_invalid_packet(),
+            Packet::Connect(_) => Self::handle_invalid_packet(sender).await,
+            Packet::ConnAck(_) => Self::handle_invalid_packet(sender).await,
+            Packet::Publish(publish) => {
+                Self::process_publish(publish, state, config.max_qos, sender).await
+            }
+            Packet::PubAck(_) => Self::handle_invalid_packet(sender).await,
+            Packet::PubRec(_) => Self::handle_invalid_packet(sender).await,
+            Packet::PubRel(_) => Self::handle_invalid_packet(sender).await,
+            Packet::PubComp(_) => Self::handle_invalid_packet(sender).await,
             Packet::Subscribe(subscribe) => {
-                Self::process_subscribe(subscribe, state, config.max_qos, client_id).await
+                Self::process_subscribe(subscribe, state, config.max_qos, client_id, sender).await
             }
-            Packet::SubAck(_) => Self::handle_invalid_packet(),
+            Packet::SubAck(_) => Self::handle_invalid_packet(sender).await,
             Packet::Unsubscribe(unsubscribe) => {
-                Self::process_unsubscribe(unsubscribe, state, client_id).await
+                Self::process_unsubscribe(unsubscribe, state, client_id, sender).await
             }
-            Packet::UnsubAck(_) => Self::handle_invalid_packet(),
-            Packet::PingReq => Self::process_ping_req(),
-            Packet::PingResp => Self::handle_invalid_packet(),
+            Packet::UnsubAck(_) => Self::handle_invalid_packet(sender).await,
+            Packet::PingReq => Self::process_ping_req(sender).await,
+            Packet::PingResp => Self::handle_invalid_packet(sender).await,
             Packet::Disconnect(disconnect) => {
                 Self::process_disconnect(disconnect, state, client_id).await
             }
@@ -58,62 +61,65 @@ impl PacketHandler {
         connect: Connect,
         max_qos: QoS,
         state: &ServerState,
-    ) -> Result<Option<(ClientID, Receiver<Packet>)>> {
+    ) -> Result<Option<(ClientID, Sender<Packet>, Receiver<Packet>)>> {
         let client_id = ClientID::try_from(connect.client_id)?;
         if let Some(will) = &connect.last_will {
             if will.qos > max_qos {
                 // Will QoS exceeds max allowed QoS; reject the connection
-                let response = Packet::ConnAck(ConnAck {
-                    session_present: false,
-                    code: ConnectReturnCode::QoSNotSupported,
-                    properties: None,
-                });
+                info!("Client requested last will QoS that exceeds max allowed QoS; rejecting the connection");
                 return Ok(None);
             }
         }
 
         let (sender, receiver) = state.add_client(&client_id).await;
+        sender
+            .send(Packet::ConnAck(ConnAck::new(
+                ConnectReturnCode::Success,
+                false,
+            )))
+            .await?;
 
-        let response = Packet::ConnAck(ConnAck::new(ConnectReturnCode::Success, false));
-        Ok(Some((client_id, receiver)))
+        Ok(Some((client_id, sender, receiver)))
     }
 
-    fn handle_invalid_packet() -> Result<(Option<Packet>, bool)> {
-        Ok((
-            Some(Packet::Disconnect(Disconnect {
+    async fn handle_invalid_packet(sender: &Sender<Packet>) -> Result<bool> {
+        sender
+            .send(Packet::Disconnect(Disconnect {
                 reason_code: DisconnectReasonCode::ProtocolError,
                 properties: None,
-            })),
-            true,
-        ))
+            }))
+            .await?;
+        Ok(true)
     }
 
     async fn process_disconnect(
         _: Disconnect,
         state: &ServerState,
         client_id: &ClientID,
-    ) -> Result<(Option<Packet>, bool)> {
+    ) -> Result<bool> {
         state.remove_client(client_id).await;
-        Ok((None, true))
+        Ok(true)
     }
 
-    fn process_ping_req() -> Result<(Option<Packet>, bool)> {
-        Ok((Some(Packet::PingResp), false))
+    async fn process_ping_req(sender: &Sender<Packet>) -> Result<bool> {
+        sender.send(Packet::PingResp).await?;
+        Ok(false)
     }
 
     async fn process_publish(
         publish: Publish,
         state: &ServerState,
         max_qos: QoS,
-    ) -> Result<(Option<Packet>, bool)> {
+        sender: &Sender<Packet>,
+    ) -> Result<bool> {
         if publish.qos > max_qos {
-            return Ok((
-                Some(Packet::Disconnect(Disconnect {
+            sender
+                .send(Packet::Disconnect(Disconnect {
                     reason_code: DisconnectReasonCode::QoSNotSupported,
                     properties: None,
-                })),
-                true,
-            ));
+                }))
+                .await?;
+            return Ok(true);
         }
 
         let clients = state.clients.read().await;
@@ -129,7 +135,7 @@ impl PacketHandler {
             }
         }
 
-        Ok((None, false))
+        Ok(false)
     }
 
     async fn process_subscribe(
@@ -137,7 +143,8 @@ impl PacketHandler {
         state: &ServerState,
         max_qos: QoS,
         client_id: &ClientID,
-    ) -> Result<(Option<Packet>, bool)> {
+        sender: &Sender<Packet>,
+    ) -> Result<bool> {
         let mut return_codes = Vec::new();
 
         for filter in subscribe.filters {
@@ -158,17 +165,19 @@ impl PacketHandler {
             state.add_subscription(topic, client_id).await;
         }
 
-        Ok((
-            Some(Packet::SubAck(SubAck::new(subscribe.pkid, return_codes))),
-            false,
-        ))
+        sender
+            .send(Packet::SubAck(SubAck::new(subscribe.pkid, return_codes)))
+            .await?;
+
+        Ok(false)
     }
 
     async fn process_unsubscribe(
         unsubscribe: Unsubscribe,
         state: &ServerState,
         client_id: &ClientID,
-    ) -> Result<(Option<Packet>, bool)> {
+        sender: &Sender<Packet>,
+    ) -> Result<bool> {
         let mut reasons = Vec::new();
 
         for filter in unsubscribe.filters {
@@ -178,13 +187,15 @@ impl PacketHandler {
                 false => UnsubAckReason::NoSubscriptionExisted,
             });
         }
-        Ok((
-            Some(Packet::UnsubAck(UnsubAck {
+
+        sender
+            .send(Packet::UnsubAck(UnsubAck {
                 pkid: unsubscribe.pkid,
                 reasons,
                 properties: None,
-            })),
-            false,
-        ))
+            }))
+            .await?;
+
+        Ok(false)
     }
 }

@@ -3,10 +3,11 @@ use clap::Parser;
 use mqttbytes::QoS;
 use myprotocol::{MqttProtocol, QuicTransport, ALPN_QUIC_HTTP};
 use rustls::server::WebPkiClientVerifier;
+use tokio::time::timeout;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 use std::{fs, sync::Arc};
-use tokio::sync::Mutex;
 use tracing::{error, info};
 
 use anyhow::Context;
@@ -163,30 +164,31 @@ async fn handle_stream(
     let packet = protocol.recv_packet().await?;
     let client = PacketHandler::process_first_packet(packet, &config, &state).await?;
 
-    if let Some((client_id, mut receiver)) = client {
+    if let Some((client_id, sender, mut receiver)) = client {
         loop {
             if let Ok(packet) = receiver.try_recv() {
                 protocol.send_packet(packet).await?;
             }
 
-            match protocol.recv_packet().await {
-                Ok(packet) => {
-                    let (response, should_close) =
-                        PacketHandler::process_packet(packet, &config, &state, &client_id).await?;
-
-                    if let Some(response) = response {
-                        protocol.send_packet(response).await?;
-                    }
-
-                    if should_close {
-                        protocol.close_connection().await?;
-                        break;
+            match timeout(Duration::from_millis(500), protocol.recv_packet()).await {
+                Ok(recv) => {
+                    match recv {
+                        Ok(packet) => {
+                            let should_close =
+                                PacketHandler::process_packet(packet, &config, &state, &client_id, &sender).await?;
+        
+                            if should_close {
+                                protocol.close_connection().await?;
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            error!("Error handling packet: {:?}", e);
+                            break;
+                        }
                     }
                 }
-                Err(e) => {
-                    error!("Error handling packet: {:?}", e);
-                    break;
-                }
+                Err(e) => continue
             }
         }
     }
