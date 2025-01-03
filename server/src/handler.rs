@@ -2,6 +2,7 @@ use crate::state::ServerState;
 use anyhow::Result;
 use mqttbytes::{v5::*, QoS};
 use myprotocol::ClientID;
+use tokio::sync::mpsc::Receiver;
 use tracing::info;
 
 pub struct BrokerConfig {
@@ -14,20 +15,18 @@ impl PacketHandler {
     pub async fn process_first_packet(
         packet: Packet,
         config: &BrokerConfig,
-        state: &mut ServerState,
-    ) -> Result<(Option<ClientID>, Option<Packet>, bool)> {
+        state: &ServerState,
+    ) -> Result<Option<(ClientID, Receiver<Packet>)>> {
         match packet {
-            Packet::Connect(connect) => Self::process_connect(connect, config.max_qos, state),
-            _ => {
-                Self::handle_invalid_packet().map(|(packet, disconnect)| (None, packet, disconnect))
-            }
+            Packet::Connect(connect) => Self::process_connect(connect, config.max_qos, state).await,
+            _ => Ok(None),
         }
     }
 
     pub async fn process_packet(
         packet: Packet,
         config: &BrokerConfig,
-        state: &mut ServerState,
+        state: &ServerState,
         client_id: &ClientID,
     ) -> Result<(Option<Packet>, bool)> {
         info!("Processing: {:?}", packet);
@@ -40,26 +39,26 @@ impl PacketHandler {
             Packet::PubRel(_) => Self::handle_invalid_packet(),
             Packet::PubComp(_) => Self::handle_invalid_packet(),
             Packet::Subscribe(subscribe) => {
-                Self::process_subscribe(subscribe, state, config.max_qos, client_id)
+                Self::process_subscribe(subscribe, state, config.max_qos, client_id).await
             }
             Packet::SubAck(_) => Self::handle_invalid_packet(),
             Packet::Unsubscribe(unsubscribe) => {
-                Self::process_unsubscribe(unsubscribe, state, client_id)
+                Self::process_unsubscribe(unsubscribe, state, client_id).await
             }
             Packet::UnsubAck(_) => Self::handle_invalid_packet(),
             Packet::PingReq => Self::process_ping_req(),
             Packet::PingResp => Self::handle_invalid_packet(),
             Packet::Disconnect(disconnect) => {
-                Self::process_disconnect(disconnect, state, client_id)
+                Self::process_disconnect(disconnect, state, client_id).await
             }
         }
     }
 
-    fn process_connect(
+    async fn process_connect(
         connect: Connect,
         max_qos: QoS,
-        state: &mut ServerState,
-    ) -> Result<(Option<ClientID>, Option<Packet>, bool)> {
+        state: &ServerState,
+    ) -> Result<Option<(ClientID, Receiver<Packet>)>> {
         let client_id = ClientID::try_from(connect.client_id)?;
         if let Some(will) = &connect.last_will {
             if will.qos > max_qos {
@@ -69,14 +68,14 @@ impl PacketHandler {
                     code: ConnectReturnCode::QoSNotSupported,
                     properties: None,
                 });
-                return Ok((Some(client_id), Some(response), true));
+                return Ok(None);
             }
         }
 
-        state.add_client(&client_id);
+        let (sender, receiver) = state.add_client(&client_id).await;
 
         let response = Packet::ConnAck(ConnAck::new(ConnectReturnCode::Success, false));
-        Ok((Some(client_id), Some(response), false))
+        Ok(Some((client_id, receiver)))
     }
 
     fn handle_invalid_packet() -> Result<(Option<Packet>, bool)> {
@@ -89,12 +88,12 @@ impl PacketHandler {
         ))
     }
 
-    fn process_disconnect(
+    async fn process_disconnect(
         _: Disconnect,
-        state: &mut ServerState,
+        state: &ServerState,
         client_id: &ClientID,
     ) -> Result<(Option<Packet>, bool)> {
-        state.remove_client(client_id);
+        state.remove_client(client_id).await;
         Ok((None, true))
     }
 
@@ -106,9 +105,9 @@ impl PacketHandler {
         todo!()
     }
 
-    fn process_subscribe(
+    async fn process_subscribe(
         subscribe: Subscribe,
-        state: &mut ServerState,
+        state: &ServerState,
         max_qos: QoS,
         client_id: &ClientID,
     ) -> Result<(Option<Packet>, bool)> {
@@ -129,7 +128,7 @@ impl PacketHandler {
                 },
             };
             return_codes.push(granted_qos);
-            state.add_subscription(topic, client_id);
+            state.add_subscription(topic, client_id).await;
         }
 
         Ok((
@@ -138,15 +137,15 @@ impl PacketHandler {
         ))
     }
 
-    fn process_unsubscribe(
+    async fn process_unsubscribe(
         unsubscribe: Unsubscribe,
-        state: &mut ServerState,
+        state: &ServerState,
         client_id: &ClientID,
     ) -> Result<(Option<Packet>, bool)> {
         let mut reasons = Vec::new();
 
         for filter in unsubscribe.filters {
-            let removed = state.remove_subscription(filter, client_id);
+            let removed = state.remove_subscription(filter, client_id).await;
             reasons.push(match removed {
                 true => UnsubAckReason::Success,
                 false => UnsubAckReason::NoSubscriptionExisted,

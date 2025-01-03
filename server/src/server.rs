@@ -60,7 +60,7 @@ pub struct ServerConfig {
 }
 
 pub async fn run_server(config: ServerConfig) -> Result<()> {
-    let state = Arc::new(Mutex::new(ServerState::new()));
+    let state = Arc::new(ServerState::new());
 
     let config2 = Arc::new(BrokerConfig {
         max_qos: QoS::AtMostOnce,
@@ -117,7 +117,7 @@ async fn setup_quic(config: ServerConfig) -> Result<Endpoint> {
 
 async fn accept_incoming(
     endpoint: &Endpoint,
-    state: Arc<Mutex<ServerState>>,
+    state: Arc<ServerState>,
     config: Arc<BrokerConfig>,
 ) -> Result<()> {
     while let Some(conn) = endpoint.accept().await {
@@ -135,11 +135,11 @@ async fn accept_incoming(
 
 async fn handle_connection(
     conn: Connection,
-    state: Arc<Mutex<ServerState>>,
+    state: Arc<ServerState>,
     config: Arc<BrokerConfig>,
 ) -> Result<()> {
     while let Ok((send_stream, recv_stream)) = conn.accept_bi().await {
-        let state: Arc<Mutex<ServerState>> = state.clone();
+        let state = state.clone();
         let config = config.clone();
 
         tokio::spawn(async move {
@@ -154,44 +154,25 @@ async fn handle_connection(
 async fn handle_stream(
     send: SendStream,
     recv: RecvStream,
-    state: Arc<Mutex<ServerState>>,
+    state: Arc<ServerState>,
     config: Arc<BrokerConfig>,
 ) -> Result<()> {
     let transport = QuicTransport::new(send, recv);
     let mut protocol = MqttProtocol::new(transport);
 
     let packet = protocol.recv_packet().await?;
-    let client_id;
-    {
-        let mut state_first = state.lock().await;
-        let (inner_client_id, response, should_close) =
-            PacketHandler::process_first_packet(packet, &config, &mut state_first).await?;
+    let client = PacketHandler::process_first_packet(packet, &config, &state).await?;
 
-        client_id = inner_client_id;
-
-        if let Some(response) = response {
-            protocol.send_packet(response).await?;
-        }
-
-        if should_close {
-            protocol.close_connection().await?;
-            return Ok(());
-        }
-    }
-
-    if let Some(client_id) = client_id {
-        // Subsequent packets
+    if let Some((client_id, mut receiver)) = client {
         loop {
+            if let Ok(packet) = receiver.try_recv() {
+                protocol.send_packet(packet).await?;
+            }
+
             match protocol.recv_packet().await {
                 Ok(packet) => {
-                    info!("Before");
-                    let mut state = state.lock().await;
-                    info!("After");
                     let (response, should_close) =
-                        PacketHandler::process_packet(packet, &config, &mut state, &client_id)
-                            .await?;
-
-                    info!("{:?} {should_close}", response);
+                        PacketHandler::process_packet(packet, &config, &state, &client_id).await?;
 
                     if let Some(response) = response {
                         protocol.send_packet(response).await?;
@@ -207,7 +188,6 @@ async fn handle_stream(
                     break;
                 }
             }
-            info!("Processing iteration end");
         }
     }
 
