@@ -7,11 +7,13 @@ use clap::Parser;
 use inquire::{Select, Text};
 use mqttbytes::{v5::*, QoS};
 use myprotocol::{ClientID, MqttProtocol, QuicTransport, ALPN_QUIC_HTTP};
-use quinn::{Endpoint};
+use quinn::Endpoint;
 use quinn_proto::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio::time::{self, timeout};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 #[derive(Parser, Debug)]
@@ -68,7 +70,6 @@ enum PacketOpts {
     Publish,
     Subscribe,
     Unsubscribe,
-    PingReq,
     Exit,
 }
 
@@ -105,9 +106,38 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
     let mut protocol = MqttProtocol::new(transport);
 
     let (sender, mut receiver) = mpsc::channel(100);
-    tokio::spawn(prompt_user_action(sender.clone()));
+
+    let token = CancellationToken::new();
+
+    let cloned_token = token.clone();
+
+    let sender_clone = sender.clone();
+
+    let user_prompt_task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = cloned_token.cancelled() => break,
+                r = prompt_user_action(&sender_clone) => {
+                    if let Err(e) = r {
+                        error!("Error: {}", e);
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    let mut ping_task: Option<JoinHandle<()>> = None;
 
     loop {
+        if user_prompt_task.is_finished() {
+            info!("Exiting...");
+            if let Some(handle) = ping_task {
+                handle.abort();
+            }
+            break;
+        }
+
         if let Ok(packet) = receiver.try_recv() {
             protocol.send_packet(packet).await?;
         }
@@ -118,13 +148,22 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
                     let ping_timeout = conn_ack.properties.map_or(None, |p| p.server_keep_alive);
                     let sender = sender.clone();
                     if let Some(p) = ping_timeout {
-                        tokio::spawn(async move {
-                            let mut interval = time::interval(Duration::from_secs(p.into()));
-                            loop {
-                                interval.tick().await;
-                                sender.send(Packet::PingReq).await;
-                            }
-                        });
+                        if let None = ping_task {
+                            let cloned_token = token.clone();
+
+                            ping_task = Some(tokio::spawn(async move {
+                                let mut interval = time::interval(Duration::from_secs(p.into()));
+
+                                loop {
+                                    tokio::select! {
+                                        _ = interval.tick() => {
+                                            sender.send(Packet::PingReq).await;
+                                        }
+                                        _ = cloned_token.cancelled() => break,
+                                    }
+                                }
+                            }));
+                        }
                     }
                 }
                 Ok(packet) => {
@@ -148,46 +187,44 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
     Ok(())
 }
 
-async fn prompt_user_action(sender: mpsc::Sender<Packet>) -> Result<()> {
-    loop {
-        let options = vec![
-            PacketOpts::Connect,
-            PacketOpts::Disconnect,
-            PacketOpts::Publish,
-            PacketOpts::Subscribe,
-            PacketOpts::Unsubscribe,
-            PacketOpts::PingReq,
-            PacketOpts::Exit,
-        ];
-        let ans = Select::new("Which MQTT packet do you want to send?", options).prompt()?;
+async fn prompt_user_action(sender: &mpsc::Sender<Packet>) -> Result<()> {
+    let options = vec![
+        PacketOpts::Connect,
+        PacketOpts::Disconnect,
+        PacketOpts::Publish,
+        PacketOpts::Subscribe,
+        PacketOpts::Unsubscribe,
+        PacketOpts::Exit,
+    ];
+    let ans = Select::new("Which MQTT packet do you want to send?", options).prompt()?;
 
-        let packet = match ans {
-            PacketOpts::Connect => Ok::<Packet, anyhow::Error>(Packet::Connect(Connect::new(ClientID::new()))),
-            PacketOpts::Disconnect => Ok(Packet::Disconnect(Disconnect::new())),
-            PacketOpts::Publish => {
-                let topic = Text::new("Topic:").with_default("mytopic").prompt()?;
-                let payload = Text::new("Payload:").with_default("Hello World").prompt()?;
+    let packet = match ans {
+        PacketOpts::Connect => {
+            Ok::<Packet, anyhow::Error>(Packet::Connect(Connect::new(ClientID::new())))
+        }
+        PacketOpts::Disconnect => Ok(Packet::Disconnect(Disconnect::new())),
+        PacketOpts::Publish => {
+            let topic = Text::new("Topic:").with_default("mytopic").prompt()?;
+            let payload = Text::new("Payload:").with_default("Hello World").prompt()?;
 
-                Ok(Packet::Publish(Publish::new(
-                    topic,
-                    QoS::AtMostOnce,
-                    payload,
-                )))
-            }
-            PacketOpts::Subscribe => {
-                let path = Text::new("Path:").with_default("mytopic").prompt()?;
-                Ok(Packet::Subscribe(Subscribe::new(path, QoS::AtMostOnce)))
-            }
-            PacketOpts::Unsubscribe => {
-                let topic = Text::new("Topic:").with_default("mytopic").prompt()?;
-                Ok(Packet::Unsubscribe(Unsubscribe::new(topic)))
-            }
-            PacketOpts::PingReq => Ok(Packet::PingReq),
-            PacketOpts::Exit => break,
-        }?;
+            Ok(Packet::Publish(Publish::new(
+                topic,
+                QoS::AtMostOnce,
+                payload,
+            )))
+        }
+        PacketOpts::Subscribe => {
+            let path = Text::new("Path:").with_default("mytopic").prompt()?;
+            Ok(Packet::Subscribe(Subscribe::new(path, QoS::AtMostOnce)))
+        }
+        PacketOpts::Unsubscribe => {
+            let topic = Text::new("Topic:").with_default("mytopic").prompt()?;
+            Ok(Packet::Unsubscribe(Unsubscribe::new(topic)))
+        }
+        PacketOpts::Exit => Err(anyhow!("Cancelled by user")),
+    }?;
 
-        sender.send(packet).await?;
-    }
+    sender.send(packet).await?;
 
     Ok(())
 }

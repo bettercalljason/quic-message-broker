@@ -22,3 +22,4 @@ tracing-futures = "0.2.5"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 url = "2.5.4"
 inquire = "0.7.5"
+tokio-util = "0.7.13"
