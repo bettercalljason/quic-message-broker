@@ -1,13 +1,13 @@
 use crate::state::ServerState;
 use anyhow::Result;
-use mqttbytes::{v5::*, QoS};
+use mqttbytes::{matches, v5::*, valid_filter, valid_topic, QoS};
 use myprotocol::ClientID;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{info, warn};
 
 pub struct BrokerConfig {
     pub max_qos: QoS,
-    pub keep_alive: u16 // Set it to the Transport's max idle timeout: https://github.com/quinn-rs/quinn/blob/f5b1ec7dd96c9b56ef98f2a7a91acaf5e341d718/quinn-proto/src/config/transport.rs#L331
+    pub keep_alive: u16, // Set it to the Transport's max idle timeout: https://github.com/quinn-rs/quinn/blob/f5b1ec7dd96c9b56ef98f2a7a91acaf5e341d718/quinn-proto/src/config/transport.rs#L331
 }
 
 pub struct PacketHandler;
@@ -19,7 +19,9 @@ impl PacketHandler {
         state: &ServerState,
     ) -> Result<Option<(ClientID, Sender<Packet>, Receiver<Packet>)>> {
         match packet {
-            Packet::Connect(connect) => Self::process_connect(connect, config.max_qos, config.keep_alive, state).await,
+            Packet::Connect(connect) => {
+                Self::process_connect(connect, config.max_qos, config.keep_alive, state).await
+            }
             _ => Ok(None),
         }
     }
@@ -87,7 +89,7 @@ impl PacketHandler {
             .send(Packet::ConnAck(ConnAck {
                 code: ConnectReturnCode::Success,
                 session_present: false,
-                properties: Some(properties)
+                properties: Some(properties),
             }))
             .await?;
 
@@ -124,6 +126,16 @@ impl PacketHandler {
         max_qos: QoS,
         sender: &Sender<Packet>,
     ) -> Result<bool> {
+        if !valid_topic(&publish.topic) {
+            sender
+                .send(Packet::Disconnect(Disconnect {
+                    reason_code: DisconnectReasonCode::TopicNameInvalid,
+                    properties: None,
+                }))
+                .await?;
+            return Ok(true);
+        }
+
         if publish.qos > max_qos {
             sender
                 .send(Packet::Disconnect(Disconnect {
@@ -138,7 +150,8 @@ impl PacketHandler {
         let senders = clients.iter().filter_map(|(client_id, client_info)| {
             client_info
                 .subscriptions
-                .contains(&publish.topic)
+                .iter()
+                .any(|filter| matches(&publish.topic, filter))
                 .then_some((client_id.clone(), client_info.sender.clone()))
         });
         for (client_id, sender) in senders {
@@ -160,21 +173,25 @@ impl PacketHandler {
         let mut return_codes = Vec::new();
 
         for filter in subscribe.filters {
-            let topic = filter.path.clone();
-            let granted_qos = match filter.qos {
-                qos if qos > max_qos => match max_qos {
-                    QoS::AtMostOnce => SubscribeReasonCode::QoS0,
-                    QoS::AtLeastOnce => SubscribeReasonCode::QoS1,
-                    QoS::ExactlyOnce => SubscribeReasonCode::QoS2,
-                },
-                qos => match qos {
-                    QoS::AtMostOnce => SubscribeReasonCode::QoS0,
-                    QoS::AtLeastOnce => SubscribeReasonCode::QoS1,
-                    QoS::ExactlyOnce => SubscribeReasonCode::QoS2,
-                },
-            };
-            return_codes.push(granted_qos);
-            state.add_subscription(topic, client_id).await;
+            if !valid_filter(&filter.path) {
+                return_codes.push(SubscribeReasonCode::TopicFilterInvalid)
+            } else {
+                let topic = filter.path.clone();
+                let granted_qos = match filter.qos {
+                    qos if qos > max_qos => match max_qos {
+                        QoS::AtMostOnce => SubscribeReasonCode::QoS0,
+                        QoS::AtLeastOnce => SubscribeReasonCode::QoS1,
+                        QoS::ExactlyOnce => SubscribeReasonCode::QoS2,
+                    },
+                    qos => match qos {
+                        QoS::AtMostOnce => SubscribeReasonCode::QoS0,
+                        QoS::AtLeastOnce => SubscribeReasonCode::QoS1,
+                        QoS::ExactlyOnce => SubscribeReasonCode::QoS2,
+                    },
+                };
+                return_codes.push(granted_qos);
+                state.add_subscription(topic, client_id).await;
+            }
         }
 
         sender
