@@ -1,4 +1,4 @@
-use core::fmt;
+use std::time::Duration;
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 
 use anyhow::Context;
@@ -7,9 +7,11 @@ use clap::Parser;
 use inquire::{Select, Text};
 use mqttbytes::{v5::*, QoS};
 use myprotocol::{ClientID, MqttProtocol, QuicTransport, ALPN_QUIC_HTTP};
-use quinn::Endpoint;
+use quinn::{Endpoint};
 use quinn_proto::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tracing::{error, info};
 
 #[derive(Parser, Debug)]
@@ -66,10 +68,11 @@ enum PacketOpts {
     Publish,
     Subscribe,
     Unsubscribe,
+    PingReq,
     Exit,
 }
 
-impl fmt::Display for PacketOpts {
+impl std::fmt::Display for PacketOpts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
     }
@@ -101,23 +104,25 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
     let transport = QuicTransport::new(send, recv);
     let mut protocol = MqttProtocol::new(transport);
 
+    let (sender, mut receiver) = mpsc::channel(100);
+    tokio::spawn(prompt_user_action(sender));
+
     loop {
-        match prompt_user_action() {
-            Ok(packet) => protocol.send_packet(packet).await?,
-            Err(e) => {
-                error!("Prompt error: {:?}", e);
-                break;
-            }
+        if let Ok(packet) = receiver.try_recv() {
+            protocol.send_packet(packet).await?;
         }
 
-        match protocol.recv_packet().await {
-            Ok(packet) => {
-                info!("Received packet: {:?}", packet);
-            }
-            Err(e) => {
-                error!("Error handling packet: {:?}", e);
-                break;
-            }
+        match timeout(Duration::from_millis(500), protocol.recv_packet()).await {
+            Ok(recv) => match recv {
+                Ok(packet) => {
+                    info!("Received packet: {:?}", packet);
+                }
+                Err(e) => {
+                    error!("Error handling packet: {:?}", e);
+                    break;
+                }
+            },
+            Err(e) => continue,
         }
     }
 
@@ -130,42 +135,48 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
     Ok(())
 }
 
-fn prompt_user_action() -> Result<Packet> {
-    let options = vec![
-        PacketOpts::Connect,
-        PacketOpts::Disconnect,
-        PacketOpts::Publish,
-        PacketOpts::Subscribe,
-        PacketOpts::Unsubscribe,
-        PacketOpts::Exit,
-    ];
+async fn prompt_user_action(sender: mpsc::Sender<Packet>) -> Result<()> {
+    loop {
+        let options = vec![
+            PacketOpts::Connect,
+            PacketOpts::Disconnect,
+            PacketOpts::Publish,
+            PacketOpts::Subscribe,
+            PacketOpts::Unsubscribe,
+            PacketOpts::PingReq,
+            PacketOpts::Exit,
+        ];
+        let ans = Select::new("Which MQTT packet do you want to send?", options).prompt()?;
 
-    let ans = Select::new("Which MQTT packet do you want to send?", options).prompt()?;
+        let packet = match ans {
+            PacketOpts::Connect => Ok::<Packet, anyhow::Error>(Packet::Connect(Connect::new(ClientID::new()))),
+            PacketOpts::Disconnect => Ok(Packet::Disconnect(Disconnect::new())),
+            PacketOpts::Publish => {
+                let topic = Text::new("Topic:").with_default("mytopic").prompt()?;
+                let payload = Text::new("Payload:").with_default("Hello World").prompt()?;
 
-    match ans {
-        PacketOpts::Connect => Ok(Packet::Connect(Connect::new(ClientID::new()))),
+                Ok(Packet::Publish(Publish::new(
+                    topic,
+                    QoS::AtMostOnce,
+                    payload,
+                )))
+            }
+            PacketOpts::Subscribe => {
+                let path = Text::new("Path:").with_default("mytopic").prompt()?;
+                Ok(Packet::Subscribe(Subscribe::new(path, QoS::AtMostOnce)))
+            }
+            PacketOpts::Unsubscribe => {
+                let topic = Text::new("Topic:").with_default("mytopic").prompt()?;
+                Ok(Packet::Unsubscribe(Unsubscribe::new(topic)))
+            }
+            PacketOpts::PingReq => Ok(Packet::PingReq),
+            PacketOpts::Exit => break,
+        }?;
 
-        PacketOpts::Disconnect => Ok(Packet::Disconnect(Disconnect::new())),
-        PacketOpts::Publish => {
-            let topic = Text::new("Topic:").with_default("mytopic").prompt()?;
-            let payload = Text::new("Payload:").with_default("Hello World").prompt()?;
-
-            Ok(Packet::Publish(Publish::new(
-                topic,
-                QoS::AtMostOnce,
-                payload,
-            )))
-        }
-        PacketOpts::Subscribe => {
-            let path = Text::new("Path:").with_default("mytopic").prompt()?;
-            Ok(Packet::Subscribe(Subscribe::new(path, QoS::AtMostOnce)))
-        }
-        PacketOpts::Unsubscribe => {
-            let topic = Text::new("Topic:").with_default("mytopic").prompt()?;
-            Ok(Packet::Unsubscribe(Unsubscribe::new(topic)))
-        }
-        PacketOpts::Exit => Err(anyhow!("Abort")),
+        sender.send(packet).await?;
     }
+
+    Ok(())
 }
 
 async fn setup_quic(config: &ClientConfig) -> Result<Endpoint> {

@@ -1,4 +1,8 @@
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::{
+    fs::File,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Result;
 use clap::Parser;
@@ -9,12 +13,17 @@ use tracing::error;
 mod client;
 
 fn main() {
+    // Open or create a log file
+    let file = File::create("app.log").expect("Failed to create log file");
+    let file = Arc::new(file); // Arc<Mutex> for safe access across threads
+
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
                     .unwrap_or(tracing_subscriber::EnvFilter::new("info")),
             )
+            .with_writer(file)
             .finish(),
     )
     .unwrap();
