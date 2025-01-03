@@ -1,7 +1,7 @@
 use std::{
     fs::File,
     net::{IpAddr, Ipv6Addr, SocketAddr},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
@@ -13,8 +13,11 @@ use tracing::error;
 mod client;
 
 fn main() {
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).expect("System time before UNIX EPOCH!").as_secs();
+    let filename = format!("app_{}.log", timestamp);
+
     // Open or create a log file
-    let file = File::create("app.log").expect("Failed to create log file");
+    let file = File::create(&filename).expect("Failed to create log file");
     let file = Arc::new(file); // Arc<Mutex> for safe access across threads
 
     tracing::subscriber::set_global_default(
