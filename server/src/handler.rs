@@ -84,6 +84,9 @@ impl PacketHandler {
             QoS::ExactlyOnce => 2,
         });
         properties.server_keep_alive = Some(keep_alive);
+        properties.shared_subscription_available = Some(0);
+        properties.topic_alias_max = Some(0);
+        properties.retain_available = Some(0);
 
         sender
             .send(Packet::ConnAck(ConnAck {
@@ -126,10 +129,32 @@ impl PacketHandler {
         max_qos: QoS,
         sender: &Sender<Packet>,
     ) -> Result<bool> {
-        if !valid_topic(&publish.topic) {
+        if let Some(properties) = &publish.properties {
+            if properties.topic_alias.is_some() {
+                sender
+                    .send(Packet::Disconnect(Disconnect {
+                        reason_code: DisconnectReasonCode::ProtocolError,
+                        properties: None,
+                    }))
+                    .await?;
+                return Ok(true);
+            }
+        }
+
+        if publish.topic.is_empty() || !valid_topic(&publish.topic) {
             sender
                 .send(Packet::Disconnect(Disconnect {
                     reason_code: DisconnectReasonCode::TopicNameInvalid,
+                    properties: None,
+                }))
+                .await?;
+            return Ok(true);
+        }
+
+        if publish.retain {
+            sender
+                .send(Packet::Disconnect(Disconnect {
+                    reason_code: DisconnectReasonCode::RetainNotSupported,
                     properties: None,
                 }))
                 .await?;
@@ -170,6 +195,20 @@ impl PacketHandler {
         client_id: &ClientID,
         sender: &Sender<Packet>,
     ) -> Result<bool> {
+        if subscribe
+            .filters
+            .iter()
+            .any(|filter| filter.path.starts_with("$share"))
+        {
+            sender
+                .send(Packet::Disconnect(Disconnect {
+                    reason_code: DisconnectReasonCode::SharedSubscriptionNotSupported,
+                    properties: None,
+                }))
+                .await?;
+            return Ok(true);
+        }
+
         let mut return_codes = Vec::new();
 
         for filter in subscribe.filters {
