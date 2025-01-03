@@ -134,7 +134,10 @@ impl PacketHandler {
                 sender
                     .send(Packet::Disconnect(Disconnect {
                         reason_code: DisconnectReasonCode::ProtocolError,
-                        properties: None,
+                        properties: Some(DisconnectProperties {
+                            reason_string: Some("Topic aliases are not supported".to_string()),
+                            ..Default::default()
+                        }),
                     }))
                     .await?;
                 return Ok(true);
@@ -165,7 +168,23 @@ impl PacketHandler {
             sender
                 .send(Packet::Disconnect(Disconnect {
                     reason_code: DisconnectReasonCode::QoSNotSupported,
-                    properties: None,
+                    properties: Some(DisconnectProperties {
+                        reason_string: Some(format!("QoS cannot exceed {:?}", max_qos)),
+                        ..Default::default()
+                    }),
+                }))
+                .await?;
+            return Ok(true);
+        }
+
+        if publish.dup {
+            sender
+                .send(Packet::Disconnect(Disconnect {
+                    reason_code: DisconnectReasonCode::ProtocolError,
+                    properties: Some(DisconnectProperties {
+                        reason_string: Some("DUP flag must be set to 0".to_string()),
+                        ..Default::default()
+                    }),
                 }))
                 .await?;
             return Ok(true);
