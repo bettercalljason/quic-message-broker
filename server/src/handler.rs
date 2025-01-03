@@ -3,7 +3,7 @@ use anyhow::Result;
 use mqttbytes::{v5::*, QoS};
 use myprotocol::ClientID;
 use tokio::sync::mpsc::Receiver;
-use tracing::info;
+use tracing::{info, warn};
 
 pub struct BrokerConfig {
     pub max_qos: QoS,
@@ -33,7 +33,7 @@ impl PacketHandler {
         match packet {
             Packet::Connect(_) => Self::handle_invalid_packet(),
             Packet::ConnAck(_) => Self::handle_invalid_packet(),
-            Packet::Publish(publish) => Self::process_publish(publish),
+            Packet::Publish(publish) => Self::process_publish(publish, state, config.max_qos).await,
             Packet::PubAck(_) => Self::handle_invalid_packet(),
             Packet::PubRec(_) => Self::handle_invalid_packet(),
             Packet::PubRel(_) => Self::handle_invalid_packet(),
@@ -101,8 +101,35 @@ impl PacketHandler {
         Ok((Some(Packet::PingResp), false))
     }
 
-    fn process_publish(_: Publish) -> Result<(Option<Packet>, bool)> {
-        todo!()
+    async fn process_publish(
+        publish: Publish,
+        state: &ServerState,
+        max_qos: QoS,
+    ) -> Result<(Option<Packet>, bool)> {
+        if publish.qos > max_qos {
+            return Ok((
+                Some(Packet::Disconnect(Disconnect {
+                    reason_code: DisconnectReasonCode::QoSNotSupported,
+                    properties: None,
+                })),
+                true,
+            ));
+        }
+
+        let clients = state.clients.read().await;
+        let senders = clients.iter().filter_map(|(client_id, client_info)| {
+            client_info
+                .subscriptions
+                .contains(&publish.topic)
+                .then_some((client_id.clone(), client_info.sender.clone()))
+        });
+        for (client_id, sender) in senders {
+            if let Err(e) = sender.send(Packet::Publish(publish.clone())).await {
+                warn!("Failed to publish to {}: {}", client_id, e);
+            }
+        }
+
+        Ok((None, false))
     }
 
     async fn process_subscribe(
