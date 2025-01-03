@@ -11,7 +11,7 @@ use quinn::{Endpoint};
 use quinn_proto::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::sync::mpsc;
-use tokio::time::timeout;
+use tokio::time::{self, timeout};
 use tracing::{error, info};
 
 #[derive(Parser, Debug)]
@@ -105,7 +105,7 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
     let mut protocol = MqttProtocol::new(transport);
 
     let (sender, mut receiver) = mpsc::channel(100);
-    tokio::spawn(prompt_user_action(sender));
+    tokio::spawn(prompt_user_action(sender.clone()));
 
     loop {
         if let Ok(packet) = receiver.try_recv() {
@@ -114,6 +114,19 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
 
         match timeout(Duration::from_millis(500), protocol.recv_packet()).await {
             Ok(recv) => match recv {
+                Ok(Packet::ConnAck(conn_ack)) => {
+                    let ping_timeout = conn_ack.properties.map_or(None, |p| p.server_keep_alive);
+                    let sender = sender.clone();
+                    if let Some(p) = ping_timeout {
+                        tokio::spawn(async move {
+                            let mut interval = time::interval(Duration::from_secs(p.into()));
+                            loop {
+                                interval.tick().await;
+                                sender.send(Packet::PingReq).await;
+                            }
+                        });
+                    }
+                }
                 Ok(packet) => {
                     info!("Received packet: {:?}", packet);
                 }

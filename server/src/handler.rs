@@ -7,6 +7,7 @@ use tracing::{info, warn};
 
 pub struct BrokerConfig {
     pub max_qos: QoS,
+    pub keep_alive: u16 // Set it to the Transport's max idle timeout: https://github.com/quinn-rs/quinn/blob/f5b1ec7dd96c9b56ef98f2a7a91acaf5e341d718/quinn-proto/src/config/transport.rs#L331
 }
 
 pub struct PacketHandler;
@@ -18,7 +19,7 @@ impl PacketHandler {
         state: &ServerState,
     ) -> Result<Option<(ClientID, Sender<Packet>, Receiver<Packet>)>> {
         match packet {
-            Packet::Connect(connect) => Self::process_connect(connect, config.max_qos, state).await,
+            Packet::Connect(connect) => Self::process_connect(connect, config.max_qos, config.keep_alive, state).await,
             _ => Ok(None),
         }
     }
@@ -60,6 +61,7 @@ impl PacketHandler {
     async fn process_connect(
         connect: Connect,
         max_qos: QoS,
+        keep_alive: u16,
         state: &ServerState,
     ) -> Result<Option<(ClientID, Sender<Packet>, Receiver<Packet>)>> {
         let client_id = ClientID::try_from(connect.client_id)?;
@@ -72,11 +74,21 @@ impl PacketHandler {
         }
 
         let (sender, receiver) = state.add_client(&client_id).await;
+
+        let mut properties = ConnAckProperties::new();
+        properties.max_qos = Some(match max_qos {
+            QoS::AtMostOnce => 0,
+            QoS::AtLeastOnce => 1,
+            QoS::ExactlyOnce => 2,
+        });
+        properties.server_keep_alive = Some(keep_alive);
+
         sender
-            .send(Packet::ConnAck(ConnAck::new(
-                ConnectReturnCode::Success,
-                false,
-            )))
+            .send(Packet::ConnAck(ConnAck {
+                code: ConnectReturnCode::Success,
+                session_present: false,
+                properties: Some(properties)
+            }))
             .await?;
 
         Ok(Some((client_id, sender, receiver)))

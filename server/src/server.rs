@@ -63,11 +63,13 @@ pub struct ServerConfig {
 pub async fn run_server(config: ServerConfig) -> Result<()> {
     let state = Arc::new(ServerState::new());
 
+    let endpoint = setup_quic(config).await?;
+
     let config2 = Arc::new(BrokerConfig {
         max_qos: QoS::AtMostOnce,
+        keep_alive: 10 // depends on QUIC TransportConfig keep_alive and idle_timeout configuration
     });
 
-    let endpoint = setup_quic(config).await?;
     accept_incoming(&endpoint, state, config2).await?;
     endpoint.wait_idle().await;
 
@@ -170,7 +172,7 @@ async fn handle_stream(
                 protocol.send_packet(packet).await?;
             }
 
-            match timeout(Duration::from_millis(500), protocol.recv_packet()).await {
+            match timeout(Duration::from_millis(100), protocol.recv_packet()).await {
                 Ok(recv) => {
                     match recv {
                         Ok(packet) => {
