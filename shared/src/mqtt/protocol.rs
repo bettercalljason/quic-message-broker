@@ -3,9 +3,10 @@ use bytes::BytesMut;
 use mqttbytes::v5::Packet;
 use tracing::info;
 
-use crate::{MqttCodec, Transport};
+use crate::transport::Transport;
 
-// move to shared/mqtt/protocol.rs
+use super::MqttCodec;
+
 pub struct MqttProtocol<T: Transport> {
     transport: T,
     buffer: BytesMut,

@@ -1,30 +1,41 @@
 use std::collections::HashMap;
 
 use mqttbytes::v5::Packet;
-use myprotocol::ClientID;
-use tokio::sync::{mpsc::{self, Receiver, Sender}, RwLock};
+use shared::mqtt::ClientID;
+use tokio::sync::{
+    mpsc::{self, Receiver, Sender},
+    RwLock,
+};
 use tracing::info;
 
 use crate::auth::{AuthStore, User};
 
 pub struct ClientInfo {
     pub subscriptions: Vec<String>,
-    pub sender: mpsc::Sender<Packet>
+    pub sender: mpsc::Sender<Packet>,
 }
 
 pub struct ServerState {
     pub clients: RwLock<HashMap<ClientID, ClientInfo>>,
-    pub auth_store: RwLock<AuthStore>
+    pub auth_store: RwLock<AuthStore>,
 }
 
 impl ServerState {
     pub fn new() -> Self {
         let mut users = HashMap::new();
-        users.insert("jason".to_string(), User::new("jason".to_string(), "supersecure".to_string(), vec!["mytopic".to_string()], vec!["mysub".to_string()]));
+        users.insert(
+            "jason".to_string(),
+            User::new(
+                "jason".to_string(),
+                "supersecure".to_string(),
+                vec!["mytopic".to_string()],
+                vec!["mysub".to_string()],
+            ),
+        );
 
         Self {
             clients: RwLock::new(HashMap::new()),
-            auth_store: RwLock::new(AuthStore::new(users))
+            auth_store: RwLock::new(AuthStore::new(users)),
         }
     }
 
@@ -37,7 +48,7 @@ impl ServerState {
             client_id.clone(),
             ClientInfo {
                 subscriptions: Vec::new(),
-                sender: sender.clone()
+                sender: sender.clone(),
             },
         );
 

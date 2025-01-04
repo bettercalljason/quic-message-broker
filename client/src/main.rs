@@ -18,11 +18,11 @@ fn main() {
         .duration_since(UNIX_EPOCH)
         .expect("System time before UNIX EPOCH!")
         .as_secs();
-    let filename = format!("app_{}.log", timestamp);
+    let _filename = format!("app_{}.log", timestamp);
     let filename = "app.log";
 
     // Open or create a log file
-    let file = File::create(&filename).expect("Failed to create log file");
+    let file = File::create(filename).expect("Failed to create log file");
     let file = Arc::new(file); // Arc<Mutex> for safe access across threads
 
     tracing::subscriber::set_global_default(

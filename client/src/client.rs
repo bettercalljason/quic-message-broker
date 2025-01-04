@@ -1,14 +1,16 @@
 use std::time::Duration;
-use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
+use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
-use inquire::{Password, Select, Text};
+use inquire::{Select, Text};
 use mqttbytes::{v5::*, QoS};
-use myprotocol::{ClientID, MqttProtocol, QuicTransport, ALPN_QUIC_HTTP};
 use quinn::Endpoint;
 use quinn_proto::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::CertificateDer;
+use shared::{
+    mqtt::ClientID, mqtt::MqttProtocol, transport::quic::ALPN_QUIC_HTTP, transport::QuicTransport,
+};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{self, timeout};
@@ -193,8 +195,8 @@ async fn prompt_user_action(sender: &mpsc::Sender<Packet>) -> Result<()> {
 
             Ok::<Packet, anyhow::Error>(Packet::Connect(Connect {
                 login: Some(Login {
-                    username: username,
-                    password: password,
+                    username,
+                    password,
                 }),
                 protocol: mqttbytes::Protocol::V5,
                 keep_alive: 0,

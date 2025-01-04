@@ -1,21 +1,19 @@
 use std::fmt;
 
 use anyhow::{anyhow, Result};
-use bytes::{BufMut, BytesMut};
-use mqttbytes::{v5::*, PacketType};
+use bytes::BytesMut;
+use mqttbytes::v5::*;
 use rand::{distributions::Alphanumeric, Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use tracing::{info, warn};
 
 pub struct MqttCodec {
     pub max_packet_size: usize,
 }
 
-// move to shared/mqtt/codec.rs
 impl MqttCodec {
     pub fn encode(&self, packet: &Packet) -> Result<Vec<u8>> {
         let mut buffer: BytesMut = BytesMut::new();
-        let n = match packet {
+        match packet {
             Packet::Connect(connect) => connect.write(&mut buffer),
             Packet::ConnAck(conn_ack) => conn_ack.write(&mut buffer),
             Packet::Publish(publish) => publish.write(&mut buffer),
@@ -56,7 +54,7 @@ impl Default for ClientID {
 
 impl ClientID {
     pub fn new() -> Self {
-        let mut rng = ChaCha20Rng::from_entropy();
+        let rng = ChaCha20Rng::from_entropy();
         let random_id = rng
             .sample_iter(&Alphanumeric)
             .take(23)

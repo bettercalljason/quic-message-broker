@@ -1,7 +1,7 @@
 use crate::state::ServerState;
 use anyhow::Result;
 use mqttbytes::{matches, v5::*, valid_filter, valid_topic, QoS};
-use myprotocol::ClientID;
+use shared::mqtt::ClientID;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{info, warn};
 
@@ -97,8 +97,6 @@ impl PacketHandler {
                 return Ok(None); // Unauthorized
             }
         };
-
-        
 
         let (sender, receiver) = state.add_client(&client_id).await;
 

@@ -1,4 +1,4 @@
-use std::{env, fs, path::PathBuf};
+use std::{env, fs};
 
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 

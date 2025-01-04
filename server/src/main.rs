@@ -2,10 +2,10 @@ use anyhow::Result;
 use clap::Parser;
 use server::{run_server, ServerConfig};
 use tracing::error;
+mod auth;
 mod handler;
 mod server;
 mod state;
-mod auth;
 
 fn main() {
     tracing::subscriber::set_global_default(

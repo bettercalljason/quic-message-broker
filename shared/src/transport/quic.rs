@@ -3,15 +3,10 @@ use async_trait::async_trait;
 use bytes::BytesMut;
 use quinn::{RecvStream, SendStream};
 use tokio::io::AsyncReadExt;
-use tracing::info;
 
-// TODO: move to shared/transport/transport.rs (and below to shared/transport/quic.rs)
-#[async_trait]
-pub trait Transport {
-    async fn send(&mut self, data: &[u8]) -> Result<()>;
-    async fn recv(&mut self) -> Result<Vec<u8>>;
-    async fn close(&mut self) -> Result<()>;
-}
+use super::Transport;
+
+pub const ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"];
 
 pub struct QuicTransport {
     send: SendStream,
@@ -19,7 +14,7 @@ pub struct QuicTransport {
 }
 
 impl QuicTransport {
-    pub fn new(send: SendStream, mut recv: RecvStream) -> Self {
+    pub fn new(send: SendStream, recv: RecvStream) -> Self {
         Self { send, recv }
     }
 }
