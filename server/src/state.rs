@@ -1,9 +1,11 @@
-use std::{collections::HashMap};
+use std::collections::HashMap;
 
 use mqttbytes::v5::Packet;
 use myprotocol::ClientID;
 use tokio::sync::{mpsc::{self, Receiver, Sender}, RwLock};
 use tracing::info;
+
+use crate::auth::AuthStore;
 
 pub struct ClientInfo {
     pub subscriptions: Vec<String>,
@@ -12,12 +14,14 @@ pub struct ClientInfo {
 
 pub struct ServerState {
     pub clients: RwLock<HashMap<ClientID, ClientInfo>>,
+    pub auth_store: RwLock<AuthStore>
 }
 
 impl ServerState {
     pub fn new() -> Self {
         Self {
             clients: RwLock::new(HashMap::new()),
+            auth_store: RwLock::new(AuthStore::new())
         }
     }
 

@@ -17,7 +17,7 @@ impl PacketHandler {
         packet: Packet,
         config: &BrokerConfig,
         state: &ServerState,
-    ) -> Result<Option<(ClientID, Sender<Packet>, Receiver<Packet>)>> {
+    ) -> Result<Option<(ClientID, String, Sender<Packet>, Receiver<Packet>)>> {
         match packet {
             Packet::Connect(connect) => {
                 Self::process_connect(connect, config.max_qos, config.keep_alive, state).await
@@ -31,6 +31,7 @@ impl PacketHandler {
         config: &BrokerConfig,
         state: &ServerState,
         client_id: &ClientID,
+        username: &str,
         sender: &Sender<Packet>,
     ) -> Result<bool> {
         info!("Processing: {:?}", packet);
@@ -38,14 +39,22 @@ impl PacketHandler {
             Packet::Connect(_) => Self::handle_invalid_packet(sender).await,
             Packet::ConnAck(_) => Self::handle_invalid_packet(sender).await,
             Packet::Publish(publish) => {
-                Self::process_publish(publish, state, config.max_qos, sender).await
+                Self::process_publish(publish, state, config.max_qos, username, sender).await
             }
             Packet::PubAck(_) => Self::handle_invalid_packet(sender).await,
             Packet::PubRec(_) => Self::handle_invalid_packet(sender).await,
             Packet::PubRel(_) => Self::handle_invalid_packet(sender).await,
             Packet::PubComp(_) => Self::handle_invalid_packet(sender).await,
             Packet::Subscribe(subscribe) => {
-                Self::process_subscribe(subscribe, state, config.max_qos, client_id, sender).await
+                Self::process_subscribe(
+                    subscribe,
+                    state,
+                    config.max_qos,
+                    client_id,
+                    username,
+                    sender,
+                )
+                .await
             }
             Packet::SubAck(_) => Self::handle_invalid_packet(sender).await,
             Packet::Unsubscribe(unsubscribe) => {
@@ -65,7 +74,7 @@ impl PacketHandler {
         max_qos: QoS,
         keep_alive: u16,
         state: &ServerState,
-    ) -> Result<Option<(ClientID, Sender<Packet>, Receiver<Packet>)>> {
+    ) -> Result<Option<(ClientID, String, Sender<Packet>, Receiver<Packet>)>> {
         let client_id = ClientID::try_from(connect.client_id)?;
         if let Some(will) = &connect.last_will {
             if will.qos > max_qos {
@@ -74,6 +83,22 @@ impl PacketHandler {
                 return Ok(None);
             }
         }
+
+        let username = match connect.login {
+            Some(login) => {
+                let auth_store = state.auth_store.read().await;
+                if !auth_store.is_login_valid(&login.username, login.password) {
+                    return Ok(None); // Unauthorized
+                } else {
+                    login.username.clone()
+                }
+            }
+            None => {
+                return Ok(None); // Unauthorized
+            }
+        };
+
+        
 
         let (sender, receiver) = state.add_client(&client_id).await;
 
@@ -96,7 +121,7 @@ impl PacketHandler {
             }))
             .await?;
 
-        Ok(Some((client_id, sender, receiver)))
+        Ok(Some((client_id, username, sender, receiver)))
     }
 
     async fn handle_invalid_packet(sender: &Sender<Packet>) -> Result<bool> {
@@ -127,6 +152,7 @@ impl PacketHandler {
         publish: Publish,
         state: &ServerState,
         max_qos: QoS,
+        username: &str,
         sender: &Sender<Packet>,
     ) -> Result<bool> {
         if let Some(properties) = &publish.properties {
@@ -148,6 +174,21 @@ impl PacketHandler {
             sender
                 .send(Packet::Disconnect(Disconnect {
                     reason_code: DisconnectReasonCode::TopicNameInvalid,
+                    properties: None,
+                }))
+                .await?;
+            return Ok(true);
+        }
+
+        if !state
+            .auth_store
+            .read()
+            .await
+            .can_user_publish(&username, &publish.topic)?
+        {
+            sender
+                .send(Packet::Disconnect(Disconnect {
+                    reason_code: DisconnectReasonCode::NotAuthorized,
                     properties: None,
                 }))
                 .await?;
@@ -212,6 +253,7 @@ impl PacketHandler {
         state: &ServerState,
         max_qos: QoS,
         client_id: &ClientID,
+        username: &str,
         sender: &Sender<Packet>,
     ) -> Result<bool> {
         if subscribe
@@ -232,7 +274,14 @@ impl PacketHandler {
 
         for filter in subscribe.filters {
             if !valid_filter(&filter.path) {
-                return_codes.push(SubscribeReasonCode::TopicFilterInvalid)
+                return_codes.push(SubscribeReasonCode::TopicFilterInvalid);
+            } else if !state
+                .auth_store
+                .read()
+                .await
+                .can_user_subscribe(&username, &filter.path)?
+            {
+                return_codes.push(SubscribeReasonCode::NotAuthorized);
             } else {
                 let topic = filter.path.clone();
                 let granted_qos = match filter.qos {

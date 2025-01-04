@@ -3,11 +3,11 @@ use clap::Parser;
 use mqttbytes::QoS;
 use myprotocol::{MqttProtocol, QuicTransport, ALPN_QUIC_HTTP};
 use rustls::server::WebPkiClientVerifier;
-use tokio::time::timeout;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::{fs, sync::Arc};
+use tokio::time::timeout;
 use tracing::{error, info};
 
 use anyhow::Context;
@@ -67,7 +67,7 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
 
     let config2 = Arc::new(BrokerConfig {
         max_qos: QoS::AtMostOnce,
-        keep_alive: 10 // depends on QUIC TransportConfig keep_alive and idle_timeout configuration
+        keep_alive: 10, // depends on QUIC TransportConfig keep_alive and idle_timeout configuration
     });
 
     accept_incoming(&endpoint, state, config2).await?;
@@ -166,31 +166,31 @@ async fn handle_stream(
     let packet = protocol.recv_packet().await?;
     let client = PacketHandler::process_first_packet(packet, &config, &state).await?;
 
-    if let Some((client_id, sender, mut receiver)) = client {
+    if let Some((client_id, username, sender, mut receiver)) = client {
         loop {
             if let Ok(packet) = receiver.try_recv() {
                 protocol.send_packet(packet).await?;
             }
 
             match timeout(Duration::from_millis(100), protocol.recv_packet()).await {
-                Ok(recv) => {
-                    match recv {
-                        Ok(packet) => {
-                            let should_close =
-                                PacketHandler::process_packet(packet, &config, &state, &client_id, &sender).await?;
-        
-                            if should_close {
-                                protocol.close_connection().await?;
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            error!("Error handling packet: {:?}", e);
+                Ok(recv) => match recv {
+                    Ok(packet) => {
+                        let should_close = PacketHandler::process_packet(
+                            packet, &config, &state, &client_id, &username, &sender,
+                        )
+                        .await?;
+
+                        if should_close {
+                            protocol.close_connection().await?;
                             break;
                         }
                     }
-                }
-                Err(e) => continue
+                    Err(e) => {
+                        error!("Error handling packet: {:?}", e);
+                        break;
+                    }
+                },
+                Err(e) => continue,
             }
         }
     }

@@ -5,6 +5,7 @@ use tracing::error;
 mod handler;
 mod server;
 mod state;
+mod auth;
 
 fn main() {
     tracing::subscriber::set_global_default(
