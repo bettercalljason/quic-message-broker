@@ -136,9 +136,7 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
                         }
                     }
                 }
-                Ok(packet) => {
-                    info!("Received packet: {:?}", packet);
-                }
+                Ok(_) => {},
                 Err(e) => {
                     error!("Error handling packet: {:?}", e);
                     break;

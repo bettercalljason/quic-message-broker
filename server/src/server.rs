@@ -95,6 +95,7 @@ async fn setup_quic(config: &ServerConfig) -> Result<Endpoint> {
         quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
     let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
     transport_config.max_concurrent_uni_streams(0_u8.into());
+    transport_config.max_concurrent_bidi_streams(1_u8.into());
 
     let endpoint = quinn::Endpoint::server(server_config, config.listen)?;
     info!("Listening on {}", endpoint.local_addr()?);
@@ -109,8 +110,6 @@ async fn handle_connection(
 ) -> Result<()> {
     let connection = conn.await?;
     let span = info_span!("connection", remote = %connection.remote_address());
-
-    connection.set_max_concurrent_bi_streams(1_u8.into());
 
     async {
         info!("Established");
