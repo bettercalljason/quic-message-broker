@@ -1,15 +1,14 @@
 use std::time::Duration;
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 
-use anyhow::Context;
 use anyhow::{anyhow, Result};
 use clap::Parser;
-use inquire::{Select, Text};
+use inquire::{Password, Select, Text};
 use mqttbytes::{v5::*, QoS};
 use myprotocol::{ClientID, MqttProtocol, QuicTransport, ALPN_QUIC_HTTP};
 use quinn::Endpoint;
 use quinn_proto::crypto::rustls::QuicClientConfig;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::CertificateDer;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{self, timeout};
@@ -19,10 +18,6 @@ use tracing::{error, info};
 #[derive(Parser, Debug)]
 #[clap(name = "client-config")]
 pub struct ClientConfig {
-    /// Perform NSS-compatible TLS key logging to the file specified in `SSLKEYLOGFILE`.
-    #[clap(long = "keylog")]
-    pub keylog: bool,
-
     #[clap(default_value = "[::1]:4433")]
     pub remote: SocketAddr,
 
@@ -33,34 +28,13 @@ pub struct ClientConfig {
     /// Custom certificate authority to trust, in DER format
     #[clap(
         long = "ca",
-        default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\server\\cert.der"
+        default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\cert.der"
     )]
     pub ca: PathBuf,
-
-    /// Simulate NAT rebinding after connecting
-    #[clap(long = "rebind")]
-    pub rebind: bool,
 
     /// Address to bind on
     #[clap(long = "bind", default_value = "[::]:0")]
     pub bind: SocketAddr,
-
-    /// TLS private key in PEM format
-    #[clap(
-        short = 'k',
-        long = "key",
-        requires = "cert",
-        default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\client\\key.der"
-    )]
-    pub key: PathBuf,
-    /// TLS certificate in PEM format
-    #[clap(
-        short = 'c',
-        long = "cert",
-        requires = "key",
-        default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\client\\cert.der"
-    )]
-    pub cert: PathBuf,
 }
 
 #[derive(Debug)]
@@ -82,25 +56,16 @@ impl std::fmt::Display for PacketOpts {
 pub async fn run_client(config: ClientConfig) -> Result<()> {
     let endpoint = setup_quic(&config).await?;
 
-    let start = Instant::now();
-    let rebind = config.rebind;
-
-    info!("connecting to {}", config.remote);
+    info!("Connecting to {}", config.remote);
     let conn = endpoint
         .connect(config.remote, &config.host.clone())?
         .await
-        .map_err(|e| anyhow!("failed to connect: {}", e))?;
-    info!("connected at {:?}", start.elapsed());
+        .map_err(|e| anyhow!("Failed to connect: {}", e))?;
     let (send, recv) = conn
         .open_bi()
         .await
-        .map_err(|e| anyhow!("failed to open stream: {}", e))?;
-    if rebind {
-        let socket = std::net::UdpSocket::bind("[::]:0").unwrap();
-        let addr = socket.local_addr().unwrap();
-        info!("rebinding to {addr}");
-        endpoint.rebind(socket).expect("rebind failed");
-    }
+        .map_err(|e| anyhow!("Failed to open stream: {}", e))?;
+    info!("Connection established");
 
     let transport = QuicTransport::new(send, recv);
     let mut protocol = MqttProtocol::new(transport);
@@ -145,10 +110,10 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
         match timeout(Duration::from_millis(500), protocol.recv_packet()).await {
             Ok(recv) => match recv {
                 Ok(Packet::ConnAck(conn_ack)) => {
-                    let ping_timeout = conn_ack.properties.map_or(None, |p| p.server_keep_alive);
+                    let ping_timeout = conn_ack.properties.and_then(|p| p.server_keep_alive);
                     let sender = sender.clone();
                     if let Some(p) = ping_timeout {
-                        if let None = ping_task {
+                        if ping_task.is_none() {
                             let cloned_token = token.clone();
 
                             ping_task = Some(tokio::spawn(async move {
@@ -157,7 +122,10 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
                                 loop {
                                     tokio::select! {
                                         _ = interval.tick() => {
-                                            sender.send(Packet::PingReq).await;
+                                            if let Err(e) = sender.send(Packet::PingReq).await {
+                                                error!("Sending PingReq failed: {}. No more PingReq's will be sent", e);
+                                                break;
+                                            }
                                         }
                                         _ = cloned_token.cancelled() => break,
                                     }
@@ -174,7 +142,7 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
                     break;
                 }
             },
-            Err(e) => continue,
+            Err(_) => continue,
         }
     }
 
@@ -185,6 +153,24 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
     endpoint.wait_idle().await;
 
     Ok(())
+}
+
+async fn setup_quic(config: &ClientConfig) -> Result<Endpoint> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(CertificateDer::from(fs::read(&config.ca)?))?;
+
+    let mut client_crypto = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+
+    client_crypto.alpn_protocols = ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
+
+    let client_config =
+        quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));
+    let mut endpoint = quinn::Endpoint::client(config.bind)?;
+    endpoint.set_default_client_config(client_config);
+
+    Ok(endpoint)
 }
 
 async fn prompt_user_action(sender: &mpsc::Sender<Packet>) -> Result<()> {
@@ -200,7 +186,23 @@ async fn prompt_user_action(sender: &mpsc::Sender<Packet>) -> Result<()> {
 
     let packet = match ans {
         PacketOpts::Connect => {
-            Ok::<Packet, anyhow::Error>(Packet::Connect(Connect::new(ClientID::new())))
+            let username = Text::new("Username:").with_default("jason").prompt()?;
+            let password = Text::new("Password:")
+                .with_default("supersecure")
+                .prompt()?;
+
+            Ok::<Packet, anyhow::Error>(Packet::Connect(Connect {
+                login: Some(Login {
+                    username: username,
+                    password: password,
+                }),
+                protocol: mqttbytes::Protocol::V5,
+                keep_alive: 0,
+                client_id: ClientID::new().to_string(),
+                clean_session: true,
+                last_will: None,
+                properties: None,
+            }))
         }
         PacketOpts::Disconnect => Ok(Packet::Disconnect(Disconnect::new())),
         PacketOpts::Publish => {
@@ -227,43 +229,4 @@ async fn prompt_user_action(sender: &mpsc::Sender<Packet>) -> Result<()> {
     sender.send(packet).await?;
 
     Ok(())
-}
-
-async fn setup_quic(config: &ClientConfig) -> Result<Endpoint> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.add(CertificateDer::from(fs::read(&config.ca)?))?;
-
-    let key = fs::read(&config.key).context("failed to read private key")?;
-    let key = if config.key.extension().is_some_and(|x| x == "der") {
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key))
-    } else {
-        rustls_pemfile::private_key(&mut &*key)
-            .context("malformed PKCS #1 private key")?
-            .ok_or_else(|| anyhow::Error::msg("no private keys found"))?
-    };
-    let certs = fs::read(&config.cert).context("failed to read certificate chain")?;
-    let certs = if config.cert.extension().is_some_and(|x| x == "der") {
-        vec![CertificateDer::from(certs)]
-    } else {
-        rustls_pemfile::certs(&mut &*certs)
-            .collect::<Result<_, _>>()
-            .context("invalid PEM-encoded certificate")?
-    };
-
-    let mut client_crypto = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        //.with_no_client_auth();
-        .with_client_auth_cert(certs, key)?;
-
-    client_crypto.alpn_protocols = ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
-    if config.keylog {
-        client_crypto.key_log = Arc::new(rustls::KeyLogFile::new());
-    }
-
-    let client_config =
-        quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));
-    let mut endpoint = quinn::Endpoint::client(config.bind)?;
-    endpoint.set_default_client_config(client_config);
-
-    Ok(endpoint)
 }

@@ -2,18 +2,17 @@ use anyhow::Result;
 use clap::Parser;
 use mqttbytes::QoS;
 use myprotocol::{MqttProtocol, QuicTransport, ALPN_QUIC_HTTP};
-use rustls::server::WebPkiClientVerifier;
+use quinn::crypto::rustls::QuicServerConfig;
+use quinn::{Endpoint, RecvStream, SendStream};
+use rustls::pki_types::PrivatePkcs8KeyDer;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
-use std::{fs, sync::Arc};
 use tokio::time::timeout;
-use tracing::{error, info};
-
-use anyhow::Context;
-use quinn::crypto::rustls::QuicServerConfig;
-use quinn::{Connection, Endpoint, RecvStream, SendStream};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use tracing::{error, info, info_span, Instrument};
 
 use crate::handler::{BrokerConfig, PacketHandler};
 use crate::state::ServerState;
@@ -29,32 +28,23 @@ pub struct ServerConfig {
         short = 'k',
         long = "key",
         requires = "cert",
-        default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\server\\key.der"
+        default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\key.der"
     )]
     pub key: PathBuf,
-    /// TLS certificate in PEM format
+    /// TLS certificate in DER format
     #[clap(
         short = 'c',
         long = "cert",
         requires = "key",
-        default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\server\\cert.der"
+        default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\cert.der"
     )]
     pub cert: PathBuf,
-    /// TLS client certificate in PEM format to trust
-    #[clap(
-        long = "client_cert",
-        default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\client\\cert.der"
-    )]
-    pub client_cert: PathBuf,
     /// Enable stateless retries
     #[clap(long = "stateless-retry")]
     pub stateless_retry: bool,
     /// Address to listen on
     #[clap(long = "listen", default_value = "[::1]:4433")]
     pub listen: SocketAddr,
-    /// Client address to block
-    #[clap(long = "block")]
-    pub block: Option<SocketAddr>,
     /// Maximum number of concurrent connections to allow
     #[clap(long = "connection-limit")]
     pub connection_limit: Option<usize>,
@@ -63,49 +53,43 @@ pub struct ServerConfig {
 pub async fn run_server(config: ServerConfig) -> Result<()> {
     let state = Arc::new(ServerState::new());
 
-    let endpoint = setup_quic(config).await?;
+    let endpoint = setup_quic(&config).await?;
 
     let config2 = Arc::new(BrokerConfig {
         max_qos: QoS::AtMostOnce,
         keep_alive: 10, // depends on QUIC TransportConfig keep_alive and idle_timeout configuration
     });
 
-    accept_incoming(&endpoint, state, config2).await?;
+    while let Some(conn) = endpoint.accept().await {
+        if config
+            .connection_limit
+            .is_some_and(|n| endpoint.open_connections() >= n)
+        {
+            info!("Refusing due to open connection limit");
+            conn.refuse();
+        } else {
+            info!("Accepting connection");
+            let fut = handle_connection(conn, state.clone(), config2.clone());
+            tokio::spawn(async move {
+                if let Err(e) = fut.await {
+                    error!("Connection failed: {:?}", e);
+                }
+            });
+        }
+    }
     endpoint.wait_idle().await;
 
     Ok(())
 }
 
-async fn setup_quic(config: ServerConfig) -> Result<Endpoint> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.add(CertificateDer::from(fs::read(&config.client_cert)?))?;
-
-    let key = fs::read(&config.key).context("failed to read private key")?;
-    let key = if config.key.extension().is_some_and(|x| x == "der") {
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key))
-    } else {
-        rustls_pemfile::private_key(&mut &*key)
-            .context("malformed PKCS #1 private key")?
-            .ok_or_else(|| anyhow::Error::msg("no private keys found"))?
-    };
-    let certs = fs::read(&config.cert).context("failed to read certificate chain")?;
-    let certs = if config.cert.extension().is_some_and(|x| x == "der") {
-        vec![CertificateDer::from(certs)]
-    } else {
-        rustls_pemfile::certs(&mut &*certs)
-            .collect::<Result<_, _>>()
-            .context("invalid PEM-encoded certificate")?
-    };
-
-    let verifier = WebPkiClientVerifier::builder(roots.into()).build()?;
+async fn setup_quic(config: &ServerConfig) -> Result<Endpoint> {
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(fs::read(&config.key)?));
+    let certs = vec![CertificateDer::from(fs::read(&config.cert)?)];
 
     let mut server_crypto = rustls::ServerConfig::builder()
-        .with_client_cert_verifier(verifier)
+        .with_no_client_auth()
         .with_single_cert(certs, key)?;
     server_crypto.alpn_protocols = ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
-    if config.keylog {
-        server_crypto.key_log = Arc::new(rustls::KeyLogFile::new());
-    }
 
     let mut server_config =
         quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
@@ -118,45 +102,50 @@ async fn setup_quic(config: ServerConfig) -> Result<Endpoint> {
     Ok(endpoint)
 }
 
-async fn accept_incoming(
-    endpoint: &Endpoint,
-    state: Arc<ServerState>,
-    config: Arc<BrokerConfig>,
-) -> Result<()> {
-    while let Some(conn) = endpoint.accept().await {
-        let new_conn = conn.await?;
-        let state = state.clone();
-        let config = config.clone();
-        tokio::spawn(async move {
-            if let Err(err) = handle_connection(new_conn, state, config).await {
-                error!("Error handling connection: {:?}", err);
-            }
-        });
-    }
-    Ok(())
-}
-
 async fn handle_connection(
-    conn: Connection,
+    conn: quinn::Incoming,
     state: Arc<ServerState>,
     config: Arc<BrokerConfig>,
 ) -> Result<()> {
-    while let Ok((send_stream, recv_stream)) = conn.accept_bi().await {
-        let state = state.clone();
-        let config = config.clone();
+    let connection = conn.await?;
+    let span = info_span!("connection", remote = %connection.remote_address());
 
-        tokio::spawn(async move {
-            if let Err(e) = handle_stream(send_stream, recv_stream, state, config).await {
-                error!("Error handling stream: {:?}", e);
-            }
-        });
+    connection.set_max_concurrent_bi_streams(1_u8.into());
+
+    async {
+        info!("Established");
+
+        loop {
+            let stream = connection.accept_bi().await;
+            let stream = match stream {
+                Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
+                    info!("Closed");
+                    return Ok(());
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+                Ok(s) => s,
+            };
+            let fut = handle_stream(stream, state.clone(), config.clone());
+            tokio::spawn(
+                async move {
+                    if let Err(e) = fut.await {
+                        error!("Failed: {:?}", e);
+                    }
+                }
+                .instrument(info_span!("stream")),
+            );
+        }
     }
+    .instrument(span)
+    .await?;
+
     Ok(())
 }
 
 async fn handle_stream(
-    send: SendStream,
-    recv: RecvStream,
+    (send, recv): (SendStream, RecvStream),
     state: Arc<ServerState>,
     config: Arc<BrokerConfig>,
 ) -> Result<()> {
@@ -190,7 +179,7 @@ async fn handle_stream(
                         break;
                     }
                 },
-                Err(e) => continue,
+                Err(_) => continue,
             }
         }
     }

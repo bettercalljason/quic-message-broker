@@ -72,7 +72,7 @@ impl ClientID {
 
 impl fmt::Display for ClientID {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ClientID {}", self.0)
+        write!(f, "{}", self.0)
     }
 }
 

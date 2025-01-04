@@ -1,9 +1,9 @@
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use subtle::ConstantTimeEq;
-use anyhow::{anyhow, Result};
 
 pub struct User {
-    username: String,
+    _username: String,
     password: String, // TODO: Store hashed value in a database
     allowed_filters: Vec<String>,
     allowed_topics: Vec<String>,
@@ -17,7 +17,7 @@ impl User {
         allowed_topics: Vec<String>,
     ) -> Self {
         Self {
-            username,
+            _username: username,
             password,
             allowed_filters,
             allowed_topics,
@@ -38,18 +38,22 @@ pub struct AuthStore {
 }
 
 impl AuthStore {
-    pub fn new() -> Self {
-        Self {
-            users: HashMap::new(),
-        }
+    pub fn new(users: HashMap<String, User>) -> Self {
+        Self { users }
     }
 
     pub fn can_user_publish(&self, username: &str, topic: &str) -> Result<bool> {
-        self.users.get(username).ok_or(anyhow!("User does not exist")).map(|user| user.can_publish(topic.to_string()))
+        self.users
+            .get(username)
+            .ok_or(anyhow!("User does not exist"))
+            .map(|user| user.can_publish(topic.to_string()))
     }
 
     pub fn can_user_subscribe(&self, username: &str, filter: &str) -> Result<bool> {
-        self.users.get(username).ok_or(anyhow!("User does not exist")).map(|user| user.can_subscribe(filter.to_string()))
+        self.users
+            .get(username)
+            .ok_or(anyhow!("User does not exist"))
+            .map(|user| user.can_subscribe(filter.to_string()))
     }
 
     pub fn is_login_valid(&self, username: &str, password: String) -> bool {

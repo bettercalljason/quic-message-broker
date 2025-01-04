@@ -184,7 +184,7 @@ impl PacketHandler {
             .auth_store
             .read()
             .await
-            .can_user_publish(&username, &publish.topic)?
+            .can_user_publish(username, &publish.topic)?
         {
             sender
                 .send(Packet::Disconnect(Disconnect {
@@ -279,7 +279,7 @@ impl PacketHandler {
                 .auth_store
                 .read()
                 .await
-                .can_user_subscribe(&username, &filter.path)?
+                .can_user_subscribe(username, &filter.path)?
             {
                 return_codes.push(SubscribeReasonCode::NotAuthorized);
             } else {

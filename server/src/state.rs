@@ -5,7 +5,7 @@ use myprotocol::ClientID;
 use tokio::sync::{mpsc::{self, Receiver, Sender}, RwLock};
 use tracing::info;
 
-use crate::auth::AuthStore;
+use crate::auth::{AuthStore, User};
 
 pub struct ClientInfo {
     pub subscriptions: Vec<String>,
@@ -19,9 +19,12 @@ pub struct ServerState {
 
 impl ServerState {
     pub fn new() -> Self {
+        let mut users = HashMap::new();
+        users.insert("jason".to_string(), User::new("jason".to_string(), "supersecure".to_string(), vec!["mytopic".to_string()], vec!["mysub".to_string()]));
+
         Self {
             clients: RwLock::new(HashMap::new()),
-            auth_store: RwLock::new(AuthStore::new())
+            auth_store: RwLock::new(AuthStore::new(users))
         }
     }
 

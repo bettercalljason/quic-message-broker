@@ -1,7 +1,8 @@
 use std::{
     fs::File,
     net::{IpAddr, Ipv6Addr, SocketAddr},
-    sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH},
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
@@ -13,8 +14,12 @@ use tracing::error;
 mod client;
 
 fn main() {
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).expect("System time before UNIX EPOCH!").as_secs();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("System time before UNIX EPOCH!")
+        .as_secs();
     let filename = format!("app_{}.log", timestamp);
+    let filename = "app.log";
 
     // Open or create a log file
     let file = File::create(&filename).expect("Failed to create log file");
@@ -54,8 +59,7 @@ async fn run(config: ClientConfig) -> Result<()> {
             IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)),
             4433,
         ))
-        .prompt()
-        .unwrap();
+        .prompt()?;
 
     let my_config = ClientConfig { remote, ..config };
 
