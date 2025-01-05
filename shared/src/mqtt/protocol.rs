@@ -1,11 +1,31 @@
 use anyhow::Result;
 use bytes::BytesMut;
 use mqttbytes::v5::Packet;
-use tracing::info;
+use std::{error::Error, fmt::Debug};
+use tracing::trace;
 
 use crate::transport::Transport;
 
-use super::MqttCodec;
+use super::{MqttCodec, MqttError};
+
+#[derive(thiserror::Error)]
+pub enum ProtocolError {
+    #[error("failed to decode MQTT packet")]
+    MqttError(#[from] MqttError),
+
+    #[error("failed to send/receive packet")]
+    TransportError,
+}
+
+impl Debug for ProtocolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "{}", self)?;
+        if let Some(source) = self.source() {
+            writeln!(f, "Caused by:\n\t{}", source)?;
+        }
+        Ok(())
+    }
+}
 
 pub struct MqttProtocol<T: Transport> {
     transport: T,
@@ -25,25 +45,33 @@ impl<T: Transport> MqttProtocol<T> {
     }
 
     pub async fn send_packet(&mut self, packet: Packet) -> Result<()> {
-        info!("Sending packet {:?}", packet);
+        trace!("Sending packet {:?}", packet);
         let encoded = self.codec.encode(&packet)?;
         self.transport.send(&encoded).await
     }
 
-    pub async fn recv_packet(&mut self) -> Result<Packet> {
+    pub async fn recv_packet(&mut self) -> Result<Packet, ProtocolError> {
         loop {
-            if let Some(packet) = self.codec.decode(&mut self.buffer)? {
-                info!("Received packet {:?}", packet);
+            if let Some(packet) = self
+                .codec
+                .decode(&mut self.buffer)
+                .map_err(|e| ProtocolError::MqttError(e))?
+            {
+                trace!("Received packet {:?}", packet);
                 return Ok(packet);
             }
 
-            let chunk = self.transport.recv().await?;
+            let chunk = self
+                .transport
+                .recv()
+                .await
+                .map_err(|_| ProtocolError::TransportError)?;
             self.buffer.extend_from_slice(&chunk);
         }
     }
 
     pub async fn close_connection(&mut self) -> Result<()> {
-        info!("Closing connection");
+        trace!("Closing connection");
         self.transport.close().await
     }
 }

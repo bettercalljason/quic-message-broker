@@ -14,3 +14,4 @@ tokio = { version = "1.41.1", features = ["full"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 subtle = "2.6.1"
+thiserror = "2.0.9"

@@ -136,11 +136,10 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
                         }
                     }
                 }
-                Ok(_) => {},
-                Err(e) => {
-                    error!("Error handling packet: {:?}", e);
-                    break;
+                Ok(packet) => {
+                    info!("Received: {:?}", packet);
                 }
+                Err(e) => return Err(anyhow::anyhow!(e)),
             },
             Err(_) => continue,
         }
@@ -192,10 +191,7 @@ async fn prompt_user_action(sender: &mpsc::Sender<Packet>) -> Result<()> {
                 .prompt()?;
 
             Ok::<Packet, anyhow::Error>(Packet::Connect(Connect {
-                login: Some(Login {
-                    username,
-                    password,
-                }),
+                login: Some(Login { username, password }),
                 protocol: mqttbytes::Protocol::V5,
                 keep_alive: 0,
                 client_id: ClientID::new().to_string(),

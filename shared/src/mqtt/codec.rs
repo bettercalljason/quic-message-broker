@@ -2,9 +2,20 @@ use std::fmt;
 
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
-use mqttbytes::v5::*;
+use mqttbytes::{v5::*, Error};
 use rand::{distributions::Alphanumeric, Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
+
+#[derive(Debug)]
+pub struct MqttError(pub Error);
+
+impl fmt::Display for MqttError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for MqttError {}
 
 pub struct MqttCodec {
     pub max_packet_size: usize,
@@ -34,11 +45,11 @@ impl MqttCodec {
         Ok(buffer.to_vec())
     }
 
-    pub fn decode(&self, buffer: &mut BytesMut) -> Result<Option<Packet>> {
+    pub fn decode(&self, buffer: &mut BytesMut) -> Result<Option<Packet>, MqttError> {
         match read(buffer, self.max_packet_size) {
             Ok(packet) => Ok(Some(packet)),
             Err(mqttbytes::Error::InsufficientBytes(_)) => Ok(None), // Partial data, wait for more
-            Err(e) => Err(anyhow::anyhow!(e)),
+            Err(e) => Err(MqttError(e)),
         }
     }
 }

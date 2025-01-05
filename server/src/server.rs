@@ -151,7 +151,7 @@ async fn handle_stream(
     let transport = QuicTransport::new(send, recv);
     let mut protocol = MqttProtocol::new(transport);
 
-    let packet = protocol.recv_packet().await?;
+    let packet = protocol.recv_packet().await.map_err(|e| anyhow::anyhow!(e))?;
     let client = PacketHandler::process_first_packet(packet, &config, &state).await?;
 
     if let Some((client_id, username, sender, mut receiver)) = client {
@@ -176,8 +176,7 @@ async fn handle_stream(
                         .await?;
                     }
                     Err(e) => {
-                        error!("Error handling packet: {:?}", e);
-                        break;
+                        return Err(anyhow::anyhow!(e));
                     }
                 },
                 Err(_) => continue,
