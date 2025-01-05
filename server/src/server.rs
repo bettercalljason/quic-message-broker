@@ -1,10 +1,12 @@
 use anyhow::Result;
 use clap::Parser;
+use mqttbytes::v5::{Disconnect, DisconnectReasonCode};
 use mqttbytes::QoS;
 use quinn::crypto::rustls::QuicServerConfig;
 use quinn::{Endpoint, RecvStream, SendStream};
 use rustls::pki_types::PrivatePkcs8KeyDer;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use shared::mqtt::{MqttError, ProtocolError};
 use shared::{mqtt::MqttProtocol, transport::QuicTransport, transport::ALPN_QUIC_HTTP};
 use std::fs;
 use std::net::SocketAddr;
@@ -151,7 +153,10 @@ async fn handle_stream(
     let transport = QuicTransport::new(send, recv);
     let mut protocol = MqttProtocol::new(transport);
 
-    let packet = protocol.recv_packet().await.map_err(|e| anyhow::anyhow!(e))?;
+    let packet = protocol
+        .recv_packet()
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
     let client = PacketHandler::process_first_packet(packet, &config, &state).await?;
 
     if let Some((client_id, username, sender, mut receiver)) = client {
@@ -174,6 +179,16 @@ async fn handle_stream(
                             packet, &config, &state, &client_id, &username, &sender,
                         )
                         .await?;
+                    }
+                    Err(ProtocolError::MqttError(e)) => {
+                        error!("Error: {}; disconnecting client", e);
+                        sender
+                            .send(mqttbytes::v5::Packet::Disconnect(Disconnect {
+                                reason_code: DisconnectReasonCode::ProtocolError,
+                                properties: None,
+                            }))
+                            .await?;
+                        close_connection = true;
                     }
                     Err(e) => {
                         return Err(anyhow::anyhow!(e));
