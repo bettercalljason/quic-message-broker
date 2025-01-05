@@ -22,9 +22,6 @@ use crate::state::ServerState;
 #[derive(Parser, Debug)]
 #[clap(name = "server-config")]
 pub struct ServerConfig {
-    /// file to log TLS keys to for debugging
-    #[clap(long = "keylog")]
-    pub keylog: bool,
     /// TLS private key in PEM format
     #[clap(
         short = 'k',
@@ -41,14 +38,11 @@ pub struct ServerConfig {
         default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\cert.der"
     )]
     pub cert: PathBuf,
-    /// Enable stateless retries
-    #[clap(long = "stateless-retry")]
-    pub stateless_retry: bool,
     /// Address to listen on
     #[clap(long = "listen", default_value = "[::1]:4433")]
     pub listen: SocketAddr,
     /// Maximum number of concurrent connections to allow
-    #[clap(long = "connection-limit")]
+    #[clap(long = "connection-limit", default_value = "10")]
     pub connection_limit: Option<usize>,
 }
 
@@ -153,53 +147,61 @@ async fn handle_stream(
     let transport = QuicTransport::new(send, recv);
     let mut protocol = MqttProtocol::new(transport);
 
-    let packet = protocol
-        .recv_packet()
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
-    let client = PacketHandler::process_first_packet(packet, &config, &state).await?;
-
-    if let Some((client_id, username, sender, mut receiver)) = client {
-        let mut close_connection = false;
-        loop {
-            while let Ok(packet) = receiver.try_recv() {
-                protocol.send_packet(packet).await?;
-            }
-
-            if close_connection {
-                info!("Closing");
-                protocol.close_connection().await?;
-                break;
-            }
-
-            match timeout(Duration::from_millis(100), protocol.recv_packet()).await {
-                Ok(recv) => match recv {
-                    Ok(packet) => {
-                        close_connection = PacketHandler::process_packet(
-                            packet, &config, &state, &client_id, &username, &sender,
-                        )
-                        .await?;
-                    }
-                    Err(ProtocolError::MqttError(e)) => {
-                        error!("Error: {}; disconnecting client", e);
-                        sender
-                            .send(mqttbytes::v5::Packet::Disconnect(Disconnect {
-                                reason_code: DisconnectReasonCode::ProtocolError,
-                                properties: None,
-                            }))
-                            .await?;
-                        close_connection = true;
-                    }
-                    Err(e) => {
-                        return Err(anyhow::anyhow!(e));
-                    }
-                },
-                Err(_) => continue,
-            }
+    let packet = match protocol.recv_packet().await {
+        Ok(packet) => packet,
+        Err(e) => {
+            error!("Error receiving first packet: {}; closing connection", e);
+            protocol.close_connection().await?;
+            return Ok(());
         }
-    } else {
-        info!("Closing");
-        protocol.close_connection().await?;
+    };
+
+    let (client_id, username, sender, mut receiver) =
+        match PacketHandler::process_first_packet(packet, &config, &state).await {
+            Ok(client) => client,
+            Err(e) => {
+                error!("Error with first packet: {}; closing connection", e);
+                protocol.close_connection().await?;
+                return Ok(());
+            }
+        };
+
+    let mut close_connection = false;
+    loop {
+        while let Ok(packet) = receiver.try_recv() {
+            protocol.send_packet(packet).await?;
+        }
+
+        if close_connection {
+            info!("Closing");
+            protocol.close_connection().await?;
+            break;
+        }
+
+        match timeout(Duration::from_millis(100), protocol.recv_packet()).await {
+            Ok(recv) => match recv {
+                Ok(packet) => {
+                    close_connection = PacketHandler::process_packet(
+                        packet, &config, &state, &client_id, &username, &sender,
+                    )
+                    .await?;
+                }
+                Err(ProtocolError::MqttError(e)) => {
+                    error!("Error: {}; disconnecting client", e);
+                    sender
+                        .send(mqttbytes::v5::Packet::Disconnect(Disconnect {
+                            reason_code: DisconnectReasonCode::ProtocolError,
+                            properties: None,
+                        }))
+                        .await?;
+                    close_connection = true;
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(e));
+                }
+            },
+            Err(_) => continue,
+        }
     }
 
     Ok(())

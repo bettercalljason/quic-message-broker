@@ -17,15 +17,13 @@ impl PacketHandler {
         packet: Packet,
         config: &BrokerConfig,
         state: &ServerState,
-    ) -> Result<Option<(ClientID, String, Sender<Packet>, Receiver<Packet>)>> {
+    ) -> Result<(ClientID, String, Sender<Packet>, Receiver<Packet>)> {
         match packet {
             Packet::Connect(connect) => {
                 let client_id = ClientID::try_from(connect.client_id)?;
                 if let Some(will) = &connect.last_will {
                     if will.qos > config.max_qos {
-                        // Will QoS exceeds max allowed QoS; reject the connection
-                        info!("Client requested last will QoS that exceeds max allowed QoS; rejecting the connection");
-                        return Ok(None);
+                        return Err(anyhow::anyhow!("Client requested last will QoS that exceeds max allowed QoS"));
                     }
                 }
 
@@ -33,13 +31,13 @@ impl PacketHandler {
                     Some(login) => {
                         let auth_store = state.auth_store.read().await;
                         if !auth_store.is_login_valid(&login.username, login.password) {
-                            return Ok(None); // Unauthorized
+                            return Err(anyhow::anyhow!("Invalid username or password"));
                         } else {
                             login.username.clone()
                         }
                     }
                     None => {
-                        return Ok(None); // Unauthorized
+                        return Err(anyhow::anyhow!("Missing login credentials"));
                     }
                 };
 
@@ -64,7 +62,7 @@ impl PacketHandler {
                     }))
                     .await?;
 
-                Ok(Some((client_id, username, sender, receiver)))
+                Ok((client_id, username, sender, receiver))
             }
             packet => Err(anyhow::anyhow!(
                 "Expected {:?}, received {:?}",
