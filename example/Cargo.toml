@@ -1,0 +1,20 @@
+[package]
+name = "example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+shared = { path = "../shared" }
+anyhow = "1.0.93"
+clap = { version = "4.5.21", features = ["derive"] }
+mqttbytes = { git = "https://github.com/bettercalljason/mqttbytes.git" }
+quinn = "0.11.6"
+quinn-proto = "0.11.9"
+rustls = { version = "0.23.19", features = ["ring"] }
+tokio = { version = "1.41.1", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+inquire = "0.7.5"
+tokio-util = "0.7.13"
+thiserror = "2.0.9"
+sysinfo = "0.33.1"

@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use mqttbytes::matches;
 use std::collections::HashMap;
 use subtle::ConstantTimeEq;
 
@@ -25,11 +26,11 @@ impl User {
     }
 
     pub fn can_publish(&self, topic: String) -> bool {
-        self.allowed_topics.contains(&topic)
+        self.allowed_topics.iter().any(|t| matches(&topic, t))
     }
 
     pub fn can_subscribe(&self, filter: String) -> bool {
-        self.allowed_filters.contains(&filter)
+        self.allowed_filters.iter().any(|f| matches(&filter, f))
     }
 }
 

@@ -28,8 +28,8 @@ impl ServerState {
             User::new(
                 "jason".to_string(),
                 "supersecure".to_string(),
-                vec!["mytopic".to_string()],
-                vec!["mysub".to_string()],
+                vec!["system/home/#".to_string()],
+                vec!["system/home/#".to_string()],
             ),
         );
 
