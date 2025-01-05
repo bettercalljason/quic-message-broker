@@ -168,6 +168,7 @@ async fn handle_stream(
         &sender,
         &mut receiver,
     )
+    .instrument(info_span!("client", client_id = %client_id))
     .await
     {
         Ok(_) => {}

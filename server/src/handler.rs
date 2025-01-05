@@ -21,6 +21,11 @@ impl PacketHandler {
         match packet {
             Packet::Connect(connect) => {
                 let client_id = ClientID::try_from(connect.client_id)?;
+
+                if state.clients.read().await.contains_key(&client_id) {
+                    return Err(anyhow::anyhow!("Client with this ID is already connected"));
+                }
+
                 if let Some(will) = &connect.last_will {
                     if will.qos > config.max_qos {
                         return Err(anyhow::anyhow!(
