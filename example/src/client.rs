@@ -3,7 +3,7 @@ use std::iter::zip;
 use std::time::Duration;
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use mqttbytes::{v5::*, PacketType, QoS};
 use quinn::Endpoint;
@@ -52,6 +52,9 @@ pub struct ClientConfig {
 
     #[clap(long = "publish", default_values = ["cpu-usage", "used-memory"])]
     pub publish: Option<Vec<PublishData>>,
+
+    #[clap(long = "ping", default_value = "true")]
+    pub ping: bool,
 }
 
 pub async fn run_client(config: ClientConfig, cancel_token: CancellationToken) -> Result<()> {
@@ -63,11 +66,9 @@ pub async fn run_client(config: ClientConfig, cancel_token: CancellationToken) -
     let conn = endpoint
         .connect(config.remote, &config.host.clone())?
         .await
-        .map_err(|e| anyhow!("Failed to connect: {}", e))?;
-    let (send, recv) = conn
-        .open_bi()
-        .await
-        .map_err(|e| anyhow!("Failed to open stream: {}", e))?;
+        .context("Failed to connect")?;
+    let (send, recv) = conn.open_bi().await.context("Failed to open stream")?;
+
     info!("Connection established");
 
     let transport = QuicTransport::new(send, recv);
@@ -90,9 +91,10 @@ pub async fn run_client(config: ClientConfig, cancel_token: CancellationToken) -
         .context("Failed to connect with MQTT")?;
 
     // Expect ConnAck
-    match protocol.recv_packet().await {
-        Ok(Packet::ConnAck(_)) => {
+    let conn_ack = match protocol.recv_packet().await {
+        Ok(Packet::ConnAck(conn_ack)) => {
             info!("Received {:?}", PacketType::ConnAck);
+            conn_ack
         }
         Ok(packet) => {
             return Err(anyhow::anyhow!(
@@ -101,8 +103,12 @@ pub async fn run_client(config: ClientConfig, cancel_token: CancellationToken) -
                 packet_type(packet)
             ))
         }
-        Err(e) => return Err(anyhow::anyhow!(e).context("Failed to receive ConnAck")),
-    }
+        Err(e) => {
+            return Err(
+                anyhow::anyhow!(e).context(format!("Failed to receive {:?}", PacketType::ConnAck))
+            )
+        }
+    };
 
     sys.refresh_cpu_usage();
 
@@ -161,6 +167,14 @@ pub async fn run_client(config: ClientConfig, cancel_token: CancellationToken) -
     }
 
     let mut publish_interval = time::interval(publish_period);
+    let mut ping_interval = time::interval(Duration::from_secs(
+        conn_ack
+            .properties
+            .map(|properties| properties.server_keep_alive)
+            .flatten()
+            .unwrap_or(10)
+            .into(),
+    ));
 
     loop {
         tokio::select! {
@@ -204,6 +218,12 @@ pub async fn run_client(config: ClientConfig, cancel_token: CancellationToken) -
                             },
                         }
                     }
+            }
+            _ = ping_interval.tick() => {
+                if config.ping {
+                    info!("Sending {:?}", PacketType::PingReq);
+                    protocol.send_packet(Packet::PingReq).await.context("Failed to send PingReq")?;
+                }
             }
             packet = protocol.recv_packet() => {
                 match packet {
