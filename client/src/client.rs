@@ -20,6 +20,7 @@ use tracing::{error, info};
 #[derive(Parser, Debug)]
 #[clap(name = "client-config")]
 pub struct ClientConfig {
+    /// Remote address
     #[clap(default_value = "[::1]:4433")]
     pub remote: SocketAddr,
 
@@ -28,15 +29,16 @@ pub struct ClientConfig {
     pub host: String,
 
     /// Custom certificate authority to trust, in DER format
-    #[clap(
-        long = "ca",
-        default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\cert.der"
-    )]
+    #[clap(long = "ca")]
     pub ca: PathBuf,
 
     /// Address to bind on
     #[clap(long = "bind", default_value = "[::]:0")]
     pub bind: SocketAddr,
+
+    /// Logfile to write to
+    #[clap(long = "logfile", default_value = "app.log")]
+    pub log_file: PathBuf,
 }
 
 #[derive(Debug)]
@@ -46,7 +48,6 @@ enum PacketOpts {
     Publish,
     Subscribe,
     Unsubscribe,
-    Exit,
 }
 
 impl std::fmt::Display for PacketOpts {
@@ -180,7 +181,6 @@ async fn prompt_user_action(sender: &mpsc::Sender<Packet>) -> Result<()> {
         PacketOpts::Publish,
         PacketOpts::Subscribe,
         PacketOpts::Unsubscribe,
-        PacketOpts::Exit,
     ];
     let ans = Select::new("Which MQTT packet do you want to send?", options).prompt()?;
 
@@ -220,7 +220,6 @@ async fn prompt_user_action(sender: &mpsc::Sender<Packet>) -> Result<()> {
             let topic = Text::new("Topic:").with_default("mytopic").prompt()?;
             Ok(Packet::Unsubscribe(Unsubscribe::new(topic)))
         }
-        PacketOpts::Exit => Err(anyhow!("Cancelled by user")),
     }?;
 
     sender.send(packet).await?;

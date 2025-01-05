@@ -49,7 +49,7 @@ impl<T: Transport> MqttProtocol<T> {
         let encoded = self
             .codec
             .encode(&packet)
-            .map_err(|e| ProtocolError::MqttError(e))?;
+            .map_err(ProtocolError::MqttError)?;
         self.transport
             .send(&encoded)
             .await
@@ -61,7 +61,7 @@ impl<T: Transport> MqttProtocol<T> {
             if let Some(packet) = self
                 .codec
                 .decode(&mut self.buffer)
-                .map_err(|e| ProtocolError::MqttError(e))?
+                .map_err(ProtocolError::MqttError)?
             {
                 trace!("Received packet {:?}", packet);
                 return Ok(packet);

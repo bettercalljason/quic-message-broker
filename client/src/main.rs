@@ -2,7 +2,6 @@ use std::{
     fs::File,
     net::{IpAddr, Ipv6Addr, SocketAddr},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
@@ -14,15 +13,10 @@ use tracing::error;
 mod client;
 
 fn main() {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("System time before UNIX EPOCH!")
-        .as_secs();
-    let _filename = format!("app_{}.log", timestamp);
-    let filename = "app.log";
+    let config = ClientConfig::parse();
 
     // Open or create a log file
-    let file = File::create(filename).expect("Failed to create log file");
+    let file = File::create(&config.log_file).expect("Failed to create log file");
     let file = Arc::new(file); // Arc<Mutex> for safe access across threads
 
     tracing::subscriber::set_global_default(
@@ -40,7 +34,6 @@ fn main() {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    let config = ClientConfig::parse();
     let code = {
         if let Err(e) = run(config) {
             error!("ERROR: {e}");

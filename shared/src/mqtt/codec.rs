@@ -58,7 +58,8 @@ impl MqttCodec {
             Packet::PingReq => PingReq.write(&mut buffer),
             Packet::PingResp => PingResp.write(&mut buffer),
             Packet::Disconnect(disconnect) => disconnect.write(&mut buffer),
-        }.map_err(MqttError)?;
+        }
+        .map_err(MqttError)?;
 
         Ok(buffer.to_vec())
     }

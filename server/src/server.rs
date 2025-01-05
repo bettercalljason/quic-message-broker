@@ -24,20 +24,10 @@ use crate::state::ServerState;
 #[clap(name = "server-config")]
 pub struct ServerConfig {
     /// TLS private key in PEM format
-    #[clap(
-        short = 'k',
-        long = "key",
-        requires = "cert",
-        default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\key.der"
-    )]
+    #[clap(short = 'k', long = "key", requires = "cert")]
     pub key: PathBuf,
     /// TLS certificate in DER format
-    #[clap(
-        short = 'c',
-        long = "cert",
-        requires = "key",
-        default_value = "C:\\GitHub\\quic-message-broker\\tlsgen\\cert.der"
-    )]
+    #[clap(short = 'c', long = "cert", requires = "key")]
     pub cert: PathBuf,
     /// Address to listen on
     #[clap(long = "listen", default_value = "[::1]:4433")]
@@ -194,7 +184,7 @@ async fn handle_stream(
 
 async fn handle_client(
     client_id: &ClientID,
-    username: &String,
+    username: &str,
     state: &Arc<ServerState>,
     protocol: &mut MqttProtocol<QuicTransport>,
     config: &Arc<BrokerConfig>,
@@ -210,27 +200,24 @@ async fn handle_client(
                 .context("Failed to send packet")?;
         }
 
-        match timeout(Duration::from_millis(100), protocol.recv_packet()).await {
-            Ok(recv) => match recv {
-                Ok(packet) => {
-                    PacketHandler::process_packet(
-                        packet, &config, &state, &client_id, &username, &sender,
-                    )
-                    .await?;
-                }
-                Err(ProtocolError::MqttError(e)) => {
-                    error!("Error: {}; disconnecting client", e);
-                    state.remove_client(&client_id).await;
-                    let _ = sender.try_send(mqttbytes::v5::Packet::Disconnect(Disconnect {
-                        reason_code: DisconnectReasonCode::ProtocolError,
-                        properties: None,
-                    }));
-                }
-                Err(e) => {
-                    return Err(anyhow::anyhow!(e));
-                }
-            },
-            Err(_) => {}
-        }
+        if let Ok(recv) = timeout(Duration::from_millis(100), protocol.recv_packet()).await { match recv {
+            Ok(packet) => {
+                PacketHandler::process_packet(
+                    packet, config, state, client_id, username, sender,
+                )
+                .await?;
+            }
+            Err(ProtocolError::MqttError(e)) => {
+                error!("Error: {}; disconnecting client", e);
+                state.remove_client(client_id).await;
+                let _ = sender.try_send(mqttbytes::v5::Packet::Disconnect(Disconnect {
+                    reason_code: DisconnectReasonCode::ProtocolError,
+                    properties: None,
+                }));
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(e));
+            }
+        } }
     }
 }
