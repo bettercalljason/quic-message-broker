@@ -2,7 +2,7 @@ use std::fmt;
 
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
-use mqttbytes::{v5::*, Error};
+use mqttbytes::{v5::*, Error, PacketType};
 use rand::{distributions::Alphanumeric, Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
@@ -19,6 +19,25 @@ impl std::error::Error for MqttError {}
 
 pub struct MqttCodec {
     pub max_packet_size: usize,
+}
+
+pub fn packet_type(packet: Packet) -> PacketType {
+    match packet {
+        Packet::Connect(_) => PacketType::Connect,
+        Packet::ConnAck(_) => PacketType::ConnAck,
+        Packet::Publish(_) => PacketType::Publish,
+        Packet::PubAck(_) => PacketType::PubAck,
+        Packet::PubRec(_) => PacketType::PubRec,
+        Packet::PubRel(_) => PacketType::PubRel,
+        Packet::PubComp(_) => PacketType::PubComp,
+        Packet::Subscribe(_) => PacketType::Subscribe,
+        Packet::SubAck(_) => PacketType::SubAck,
+        Packet::Unsubscribe(_) => PacketType::Unsubscribe,
+        Packet::UnsubAck(_) => PacketType::UnsubAck,
+        Packet::PingReq => PacketType::PingReq,
+        Packet::PingResp => PacketType::PingResp,
+        Packet::Disconnect(_) => PacketType::Disconnect,
+    }
 }
 
 impl MqttCodec {

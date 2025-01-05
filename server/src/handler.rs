@@ -1,7 +1,7 @@
 use crate::state::ServerState;
 use anyhow::Result;
-use mqttbytes::{matches, v5::*, valid_filter, valid_topic, QoS};
-use shared::mqtt::ClientID;
+use mqttbytes::{matches, v5::*, valid_filter, valid_topic, PacketType, QoS};
+use shared::mqtt::{packet_type, ClientID};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{info, warn};
 
@@ -20,9 +20,57 @@ impl PacketHandler {
     ) -> Result<Option<(ClientID, String, Sender<Packet>, Receiver<Packet>)>> {
         match packet {
             Packet::Connect(connect) => {
-                Self::process_connect(connect, config.max_qos, config.keep_alive, state).await
+                let client_id = ClientID::try_from(connect.client_id)?;
+                if let Some(will) = &connect.last_will {
+                    if will.qos > config.max_qos {
+                        // Will QoS exceeds max allowed QoS; reject the connection
+                        info!("Client requested last will QoS that exceeds max allowed QoS; rejecting the connection");
+                        return Ok(None);
+                    }
+                }
+
+                let username = match connect.login {
+                    Some(login) => {
+                        let auth_store = state.auth_store.read().await;
+                        if !auth_store.is_login_valid(&login.username, login.password) {
+                            return Ok(None); // Unauthorized
+                        } else {
+                            login.username.clone()
+                        }
+                    }
+                    None => {
+                        return Ok(None); // Unauthorized
+                    }
+                };
+
+                let (sender, receiver) = state.add_client(&client_id).await;
+
+                let mut properties = ConnAckProperties::new();
+                properties.max_qos = Some(match config.max_qos {
+                    QoS::AtMostOnce => 0,
+                    QoS::AtLeastOnce => 1,
+                    QoS::ExactlyOnce => 2,
+                });
+                properties.server_keep_alive = Some(config.keep_alive);
+                properties.shared_subscription_available = Some(0);
+                properties.topic_alias_max = Some(0);
+                properties.retain_available = Some(0);
+
+                sender
+                    .send(Packet::ConnAck(ConnAck {
+                        code: ConnectReturnCode::Success,
+                        session_present: false,
+                        properties: Some(properties),
+                    }))
+                    .await?;
+
+                Ok(Some((client_id, username, sender, receiver)))
             }
-            _ => Ok(None),
+            packet => Err(anyhow::anyhow!(
+                "Expected {:?}, received {:?}",
+                PacketType::Connect,
+                packet_type(packet)
+            )),
         }
     }
 
@@ -67,59 +115,6 @@ impl PacketHandler {
                 Self::process_disconnect(disconnect, state, client_id).await
             }
         }
-    }
-
-    async fn process_connect(
-        connect: Connect,
-        max_qos: QoS,
-        keep_alive: u16,
-        state: &ServerState,
-    ) -> Result<Option<(ClientID, String, Sender<Packet>, Receiver<Packet>)>> {
-        let client_id = ClientID::try_from(connect.client_id)?;
-        if let Some(will) = &connect.last_will {
-            if will.qos > max_qos {
-                // Will QoS exceeds max allowed QoS; reject the connection
-                info!("Client requested last will QoS that exceeds max allowed QoS; rejecting the connection");
-                return Ok(None);
-            }
-        }
-
-        let username = match connect.login {
-            Some(login) => {
-                let auth_store = state.auth_store.read().await;
-                if !auth_store.is_login_valid(&login.username, login.password) {
-                    return Ok(None); // Unauthorized
-                } else {
-                    login.username.clone()
-                }
-            }
-            None => {
-                return Ok(None); // Unauthorized
-            }
-        };
-
-        let (sender, receiver) = state.add_client(&client_id).await;
-
-        let mut properties = ConnAckProperties::new();
-        properties.max_qos = Some(match max_qos {
-            QoS::AtMostOnce => 0,
-            QoS::AtLeastOnce => 1,
-            QoS::ExactlyOnce => 2,
-        });
-        properties.server_keep_alive = Some(keep_alive);
-        properties.shared_subscription_available = Some(0);
-        properties.topic_alias_max = Some(0);
-        properties.retain_available = Some(0);
-
-        sender
-            .send(Packet::ConnAck(ConnAck {
-                code: ConnectReturnCode::Success,
-                session_present: false,
-                properties: Some(properties),
-            }))
-            .await?;
-
-        Ok(Some((client_id, username, sender, receiver)))
     }
 
     async fn handle_invalid_packet(sender: &Sender<Packet>) -> Result<bool> {
