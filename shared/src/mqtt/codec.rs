@@ -22,7 +22,7 @@ pub struct MqttCodec {
 }
 
 impl MqttCodec {
-    pub fn encode(&self, packet: &Packet) -> Result<Vec<u8>> {
+    pub fn encode(&self, packet: &Packet) -> Result<Vec<u8>, MqttError> {
         let mut buffer: BytesMut = BytesMut::new();
         match packet {
             Packet::Connect(connect) => connect.write(&mut buffer),
@@ -39,8 +39,7 @@ impl MqttCodec {
             Packet::PingReq => PingReq.write(&mut buffer),
             Packet::PingResp => PingResp.write(&mut buffer),
             Packet::Disconnect(disconnect) => disconnect.write(&mut buffer),
-        }
-        .map_err(|e| anyhow::anyhow!(e))?;
+        }.map_err(MqttError)?;
 
         Ok(buffer.to_vec())
     }

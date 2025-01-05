@@ -10,11 +10,11 @@ use super::{MqttCodec, MqttError};
 
 #[derive(thiserror::Error)]
 pub enum ProtocolError {
-    #[error("failed to decode MQTT packet")]
+    #[error("MQTT: {0}")]
     MqttError(#[from] MqttError),
 
-    #[error("failed to send/receive packet")]
-    TransportError,
+    #[error("Transport: {0}")]
+    TransportError(#[from] anyhow::Error),
 }
 
 impl Debug for ProtocolError {
@@ -44,10 +44,16 @@ impl<T: Transport> MqttProtocol<T> {
         }
     }
 
-    pub async fn send_packet(&mut self, packet: Packet) -> Result<()> {
+    pub async fn send_packet(&mut self, packet: Packet) -> Result<(), ProtocolError> {
         trace!("Sending packet {:?}", packet);
-        let encoded = self.codec.encode(&packet)?;
-        self.transport.send(&encoded).await
+        let encoded = self
+            .codec
+            .encode(&packet)
+            .map_err(|e| ProtocolError::MqttError(e))?;
+        self.transport
+            .send(&encoded)
+            .await
+            .map_err(ProtocolError::TransportError)
     }
 
     pub async fn recv_packet(&mut self) -> Result<Packet, ProtocolError> {
@@ -65,13 +71,16 @@ impl<T: Transport> MqttProtocol<T> {
                 .transport
                 .recv()
                 .await
-                .map_err(|_| ProtocolError::TransportError)?;
+                .map_err(ProtocolError::TransportError)?;
             self.buffer.extend_from_slice(&chunk);
         }
     }
 
-    pub async fn close_connection(&mut self) -> Result<()> {
+    pub async fn close_connection(&mut self) -> Result<(), ProtocolError> {
         trace!("Closing connection");
-        self.transport.close().await
+        self.transport
+            .close()
+            .await
+            .map_err(ProtocolError::TransportError)
     }
 }

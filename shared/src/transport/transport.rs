@@ -1,5 +1,5 @@
-use anyhow::Result;
 use async_trait::async_trait;
+use anyhow::Result;
 
 #[async_trait]
 pub trait Transport {
