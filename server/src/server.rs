@@ -1,18 +1,19 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
-use mqttbytes::v5::{Disconnect, DisconnectReasonCode};
+use mqttbytes::v5::{Disconnect, DisconnectReasonCode, Packet};
 use mqttbytes::QoS;
 use quinn::crypto::rustls::QuicServerConfig;
 use quinn::{Endpoint, RecvStream, SendStream};
 use rustls::pki_types::PrivatePkcs8KeyDer;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use shared::mqtt::{MqttError, ProtocolError};
+use shared::mqtt::{ClientID, ProtocolError};
 use shared::{mqtt::MqttProtocol, transport::QuicTransport, transport::ALPN_QUIC_HTTP};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::timeout;
 use tracing::{error, info, info_span, Instrument};
 
@@ -105,7 +106,6 @@ async fn handle_connection(
     config: Arc<BrokerConfig>,
 ) -> Result<()> {
     let connection = conn.await?;
-    let span = info_span!("connection", remote = %connection.remote_address());
 
     async {
         info!("Established");
@@ -113,7 +113,10 @@ async fn handle_connection(
         loop {
             let stream = connection.accept_bi().await;
             let stream = match stream {
-                Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
+                Err(
+                    quinn::ConnectionError::ApplicationClosed { .. }
+                    | quinn::ConnectionError::LocallyClosed { .. },
+                ) => {
                     info!("Closed");
                     return Ok(());
                 }
@@ -133,7 +136,7 @@ async fn handle_connection(
             );
         }
     }
-    .instrument(span)
+    .instrument(info_span!("connection", remote = %connection.remote_address()))
     .await?;
 
     Ok(())
@@ -166,43 +169,68 @@ async fn handle_stream(
             }
         };
 
-    let mut close_connection = false;
+    match handle_client(
+        &client_id,
+        &username,
+        &state,
+        &mut protocol,
+        &config,
+        &sender,
+        &mut receiver,
+    )
+    .await
+    {
+        Ok(_) => {}
+        Err(e) => {
+            error!("Error: {}", e);
+        }
+    };
+
+    state.remove_client(&client_id).await;
+    protocol.close_connection().await?;
+
+    Ok(())
+}
+
+async fn handle_client(
+    client_id: &ClientID,
+    username: &String,
+    state: &Arc<ServerState>,
+    protocol: &mut MqttProtocol<QuicTransport>,
+    config: &Arc<BrokerConfig>,
+    sender: &Sender<Packet>,
+    receiver: &mut Receiver<Packet>,
+) -> Result<()> {
     loop {
         while let Ok(packet) = receiver.try_recv() {
-            protocol.send_packet(packet).await?;
-        }
-
-        if close_connection {
-            info!("Closing");
-            protocol.close_connection().await?;
-            break;
+            info!("Sending: {:?}", packet);
+            protocol
+                .send_packet(packet)
+                .await
+                .context("Failed to send packet")?;
         }
 
         match timeout(Duration::from_millis(100), protocol.recv_packet()).await {
             Ok(recv) => match recv {
                 Ok(packet) => {
-                    close_connection = PacketHandler::process_packet(
+                    PacketHandler::process_packet(
                         packet, &config, &state, &client_id, &username, &sender,
                     )
                     .await?;
                 }
                 Err(ProtocolError::MqttError(e)) => {
                     error!("Error: {}; disconnecting client", e);
-                    sender
-                        .send(mqttbytes::v5::Packet::Disconnect(Disconnect {
-                            reason_code: DisconnectReasonCode::ProtocolError,
-                            properties: None,
-                        }))
-                        .await?;
-                    close_connection = true;
+                    state.remove_client(&client_id).await;
+                    let _ = sender.try_send(mqttbytes::v5::Packet::Disconnect(Disconnect {
+                        reason_code: DisconnectReasonCode::ProtocolError,
+                        properties: None,
+                    }));
                 }
                 Err(e) => {
                     return Err(anyhow::anyhow!(e));
                 }
             },
-            Err(_) => continue,
+            Err(_) => {}
         }
     }
-
-    Ok(())
 }

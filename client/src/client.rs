@@ -112,6 +112,7 @@ pub async fn run_client(config: ClientConfig) -> Result<()> {
         match timeout(Duration::from_millis(500), protocol.recv_packet()).await {
             Ok(recv) => match recv {
                 Ok(Packet::ConnAck(conn_ack)) => {
+                    info!("Received: {:?}", conn_ack);
                     let ping_timeout = conn_ack.properties.and_then(|p| p.server_keep_alive);
                     let sender = sender.clone();
                     if let Some(p) = ping_timeout {

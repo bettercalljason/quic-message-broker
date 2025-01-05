@@ -23,7 +23,9 @@ impl PacketHandler {
                 let client_id = ClientID::try_from(connect.client_id)?;
                 if let Some(will) = &connect.last_will {
                     if will.qos > config.max_qos {
-                        return Err(anyhow::anyhow!("Client requested last will QoS that exceeds max allowed QoS"));
+                        return Err(anyhow::anyhow!(
+                            "Client requested last will QoS that exceeds max allowed QoS"
+                        ));
                     }
                 }
 
@@ -54,13 +56,20 @@ impl PacketHandler {
                 properties.topic_alias_max = Some(0);
                 properties.retain_available = Some(0);
 
-                sender
+                match sender
                     .send(Packet::ConnAck(ConnAck {
                         code: ConnectReturnCode::Success,
                         session_present: false,
                         properties: Some(properties),
                     }))
-                    .await?;
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(e) => {
+                        state.remove_client(&client_id).await;
+                        return Err(anyhow::anyhow!(e));
+                    }
+                }
 
                 Ok((client_id, username, sender, receiver))
             }
@@ -79,7 +88,7 @@ impl PacketHandler {
         client_id: &ClientID,
         username: &str,
         sender: &Sender<Packet>,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         info!("Processing: {:?}", packet);
         match packet {
             Packet::Connect(_) => Self::handle_invalid_packet(sender).await,
@@ -115,28 +124,28 @@ impl PacketHandler {
         }
     }
 
-    async fn handle_invalid_packet(sender: &Sender<Packet>) -> Result<bool> {
+    async fn handle_invalid_packet(sender: &Sender<Packet>) -> Result<()> {
         sender
             .send(Packet::Disconnect(Disconnect {
                 reason_code: DisconnectReasonCode::ProtocolError,
                 properties: None,
             }))
             .await?;
-        Ok(true)
+        Err(anyhow::anyhow!("Received invalid packet"))
     }
 
     async fn process_disconnect(
         _: Disconnect,
         state: &ServerState,
         client_id: &ClientID,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         state.remove_client(client_id).await;
-        Ok(true)
+        Err(anyhow::anyhow!("Received DISCONNECT"))
     }
 
-    async fn process_ping_req(sender: &Sender<Packet>) -> Result<bool> {
+    async fn process_ping_req(sender: &Sender<Packet>) -> Result<()> {
         sender.send(Packet::PingResp).await?;
-        Ok(false)
+        Ok(())
     }
 
     async fn process_publish(
@@ -145,7 +154,7 @@ impl PacketHandler {
         max_qos: QoS,
         username: &str,
         sender: &Sender<Packet>,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         if let Some(properties) = &publish.properties {
             if properties.topic_alias.is_some() {
                 sender
@@ -157,7 +166,7 @@ impl PacketHandler {
                         }),
                     }))
                     .await?;
-                return Ok(true);
+                return Err(anyhow::anyhow!("Client specified unsupported topic alias"));
             }
         }
 
@@ -168,7 +177,7 @@ impl PacketHandler {
                     properties: None,
                 }))
                 .await?;
-            return Ok(true);
+            return Err(anyhow::anyhow!("Client specified invalid topic name"));
         }
 
         if !state
@@ -183,7 +192,7 @@ impl PacketHandler {
                     properties: None,
                 }))
                 .await?;
-            return Ok(true);
+            return Err(anyhow::anyhow!("Unauthorized"));
         }
 
         if publish.retain {
@@ -193,7 +202,7 @@ impl PacketHandler {
                     properties: None,
                 }))
                 .await?;
-            return Ok(true);
+            return Err(anyhow::anyhow!("Client specified unsupported RETAIN flag"));
         }
 
         if publish.qos > max_qos {
@@ -206,7 +215,9 @@ impl PacketHandler {
                     }),
                 }))
                 .await?;
-            return Ok(true);
+            return Err(anyhow::anyhow!(
+                "Client specified QoS above the specified maximum"
+            ));
         }
 
         if publish.dup {
@@ -219,7 +230,7 @@ impl PacketHandler {
                     }),
                 }))
                 .await?;
-            return Ok(true);
+            return Err(anyhow::anyhow!("Client specified unsupported DUP flag"));
         }
 
         let clients = state.clients.read().await;
@@ -236,7 +247,7 @@ impl PacketHandler {
             }
         }
 
-        Ok(false)
+        Ok(())
     }
 
     async fn process_subscribe(
@@ -246,7 +257,7 @@ impl PacketHandler {
         client_id: &ClientID,
         username: &str,
         sender: &Sender<Packet>,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         if subscribe
             .filters
             .iter()
@@ -258,7 +269,7 @@ impl PacketHandler {
                     properties: None,
                 }))
                 .await?;
-            return Ok(true);
+            return Err(anyhow::anyhow!("Shared subscriptions are not supported"));
         }
 
         let mut return_codes = Vec::new();
@@ -296,7 +307,7 @@ impl PacketHandler {
             .send(Packet::SubAck(SubAck::new(subscribe.pkid, return_codes)))
             .await?;
 
-        Ok(false)
+        Ok(())
     }
 
     async fn process_unsubscribe(
@@ -304,7 +315,7 @@ impl PacketHandler {
         state: &ServerState,
         client_id: &ClientID,
         sender: &Sender<Packet>,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         let mut reasons = Vec::new();
 
         for filter in unsubscribe.filters {
@@ -323,6 +334,6 @@ impl PacketHandler {
             }))
             .await?;
 
-        Ok(false)
+        Ok(())
     }
 }
