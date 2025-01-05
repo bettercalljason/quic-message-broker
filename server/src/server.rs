@@ -155,23 +155,25 @@ async fn handle_stream(
     let client = PacketHandler::process_first_packet(packet, &config, &state).await?;
 
     if let Some((client_id, username, sender, mut receiver)) = client {
+        let mut close_connection = false;
         loop {
-            if let Ok(packet) = receiver.try_recv() {
+            while let Ok(packet) = receiver.try_recv() {
                 protocol.send_packet(packet).await?;
+            }
+
+            if close_connection {
+                info!("Closing");
+                protocol.close_connection().await?;
+                break;
             }
 
             match timeout(Duration::from_millis(100), protocol.recv_packet()).await {
                 Ok(recv) => match recv {
                     Ok(packet) => {
-                        let should_close = PacketHandler::process_packet(
+                        close_connection = PacketHandler::process_packet(
                             packet, &config, &state, &client_id, &username, &sender,
                         )
                         .await?;
-
-                        if should_close {
-                            protocol.close_connection().await?;
-                            break;
-                        }
                     }
                     Err(e) => {
                         error!("Error handling packet: {:?}", e);
@@ -181,6 +183,9 @@ async fn handle_stream(
                 Err(_) => continue,
             }
         }
+    } else {
+        info!("Closing");
+        protocol.close_connection().await?;
     }
 
     Ok(())
