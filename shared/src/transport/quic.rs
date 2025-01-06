@@ -6,7 +6,7 @@ use tokio::io::AsyncReadExt;
 
 use super::Transport;
 
-pub const ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"];
+pub const ALPN_QUIC_MQTT: &[&[u8]] = &[b"mqtt"]; // According to https://www.iana.org/assignments/tls-extensiontype-values/tls-extensiontype-values.xhtml#alpn-protocol-ids
 
 pub struct QuicTransport {
     send: SendStream,

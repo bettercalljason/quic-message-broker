@@ -10,7 +10,7 @@ use quinn::Endpoint;
 use quinn_proto::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::CertificateDer;
 use shared::mqtt::packet_type;
-use shared::{mqtt::MqttProtocol, transport::quic::ALPN_QUIC_HTTP, transport::QuicTransport};
+use shared::{mqtt::MqttProtocol, transport::quic::ALPN_QUIC_MQTT, transport::QuicTransport};
 use sysinfo::System;
 use tokio::time::{self};
 use tokio_util::sync::CancellationToken;
@@ -26,7 +26,7 @@ pub enum PublishData {
 #[clap(name = "client-config")]
 pub struct ClientConfig {
     /// Remote address
-    #[clap(default_value = "[::1]:4433")]
+    #[clap(default_value = "[::1]:14567")]
     pub remote: SocketAddr,
 
     /// Override hostname used for certificate verification
@@ -249,7 +249,7 @@ async fn setup_quic(config: &ClientConfig) -> Result<Endpoint> {
         .with_root_certificates(roots)
         .with_no_client_auth();
 
-    client_crypto.alpn_protocols = ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
+    client_crypto.alpn_protocols = ALPN_QUIC_MQTT.iter().map(|&x| x.into()).collect();
 
     let client_config =
         quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));

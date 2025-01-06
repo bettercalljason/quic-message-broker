@@ -7,7 +7,7 @@ use quinn::{Endpoint, RecvStream, SendStream};
 use rustls::pki_types::PrivatePkcs8KeyDer;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use shared::mqtt::{ClientID, ProtocolError};
-use shared::{mqtt::MqttProtocol, transport::QuicTransport, transport::ALPN_QUIC_HTTP};
+use shared::{mqtt::MqttProtocol, transport::QuicTransport, transport::ALPN_QUIC_MQTT};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -30,7 +30,7 @@ pub struct ServerConfig {
     #[clap(short = 'c', long = "cert", requires = "key")]
     pub cert: PathBuf,
     /// Address to listen on
-    #[clap(long = "listen", default_value = "[::1]:4433")]
+    #[clap(long = "listen", default_value = "[::1]:14567")]
     pub listen: SocketAddr,
     /// Maximum number of concurrent connections to allow
     #[clap(long = "connection-limit", default_value = "10")]
@@ -76,7 +76,7 @@ async fn setup_quic(config: &ServerConfig) -> Result<Endpoint> {
     let mut server_crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
-    server_crypto.alpn_protocols = ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
+    server_crypto.alpn_protocols = ALPN_QUIC_MQTT.iter().map(|&x| x.into()).collect();
 
     let mut server_config =
         quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
