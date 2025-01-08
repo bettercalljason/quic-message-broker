@@ -50,7 +50,7 @@ async fn run(config: ClientConfig) -> Result<()> {
     let remote = CustomType::<SocketAddr>::new("Enter broker address:")
         .with_default(SocketAddr::new(
             IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)),
-            14567,
+            8883,
         ))
         .prompt()?;
 

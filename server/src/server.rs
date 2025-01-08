@@ -30,7 +30,7 @@ pub struct ServerConfig {
     #[clap(short = 'c', long = "cert", requires = "key")]
     pub cert: PathBuf,
     /// Address to listen on
-    #[clap(long = "listen", default_value = "[::1]:14567")]
+    #[clap(long = "listen", default_value = "[::1]:8883")]
     pub listen: SocketAddr,
     /// Maximum number of concurrent connections to allow
     #[clap(long = "connection-limit", default_value = "10")]
@@ -44,7 +44,7 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
 
     let config2 = Arc::new(BrokerConfig {
         max_qos: QoS::AtMostOnce,
-        keep_alive: 10, // depends on QUIC TransportConfig keep_alive and idle_timeout configuration
+        keep_alive: 10, // typically, this is a few minutes. server should close if no packet received within 1.5 times of this time MQTT-3.1.2-22
     });
 
     while let Some(conn) = endpoint.accept().await {

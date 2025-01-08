@@ -21,7 +21,7 @@ use tracing::{error, info};
 #[clap(name = "client-config")]
 pub struct ClientConfig {
     /// Remote address
-    #[clap(default_value = "[::1]:14567")]
+    #[clap(default_value = "[::1]:8883")]
     pub remote: SocketAddr,
 
     /// Override hostname used for certificate verification
