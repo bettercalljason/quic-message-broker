@@ -1,10 +1,10 @@
 # Running with Cargo
 ```bash
 # Server
-cargo run --  --key "..\example\tls\key.der" --cert "..\example\tls\cert.der"
+cargo run -- --key "..\examples\tls\key.der" --cert "..\examples\tls\cert.der" --users "..\examples\auth\users.json"
 
 # Client
-cargo run -- --ca "..\example\tls\cert.der"
+cargo run -- --username user1 --password password1 --ca "..\examples\tls\cert.der"
 
 ```
 
