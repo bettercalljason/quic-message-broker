@@ -1,30 +1,17 @@
 use anyhow::{anyhow, Result};
 use mqttbytes::matches;
-use std::collections::HashMap;
+use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use subtle::ConstantTimeEq;
 
+#[derive(Deserialize, Debug)]
 pub struct User {
-    _username: String,
-    password: String, // TODO: Store hashed value in a database
-    allowed_filters: Vec<String>,
-    allowed_topics: Vec<String>,
+    password: String,
+    allowed_filters: HashSet<String>,
+    allowed_topics: HashSet<String>,
 }
 
 impl User {
-    pub fn new(
-        username: String,
-        password: String,
-        allowed_filters: Vec<String>,
-        allowed_topics: Vec<String>,
-    ) -> Self {
-        Self {
-            _username: username,
-            password,
-            allowed_filters,
-            allowed_topics,
-        }
-    }
-
     pub fn can_publish(&self, topic: String) -> bool {
         self.allowed_topics.iter().any(|t| matches(&topic, t))
     }

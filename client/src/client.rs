@@ -1,21 +1,26 @@
+use std::collections::HashSet;
+use std::iter::zip;
 use std::time::Duration;
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc};
 
-use anyhow::{anyhow, Result};
-use clap::Parser;
-use inquire::{Select, Text};
-use mqttbytes::{v5::*, QoS};
+use anyhow::{Context, Result};
+use clap::{Parser, ValueEnum};
+use mqttbytes::{v5::*, PacketType, QoS};
 use quinn::Endpoint;
 use quinn_proto::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::CertificateDer;
-use shared::{
-    mqtt::ClientID, mqtt::MqttProtocol, transport::quic::ALPN_QUIC_MQTT, transport::QuicTransport,
-};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use tokio::time::{self, timeout};
+use shared::mqtt::packet_type;
+use shared::{mqtt::MqttProtocol, transport::quic::ALPN_QUIC_MQTT, transport::QuicTransport};
+use sysinfo::System;
+use tokio::time::{self};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::info;
+
+#[derive(Copy, Hash, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
+pub enum PublishData {
+    CpuUsage,
+    UsedMemory,
+}
 
 #[derive(Parser, Debug)]
 #[clap(name = "client-config")]
@@ -36,124 +41,204 @@ pub struct ClientConfig {
     #[clap(long = "bind", default_value = "[::]:0")]
     pub bind: SocketAddr,
 
-    /// Logfile to write to
-    #[clap(long = "logfile", default_value = "app.log")]
-    pub log_file: PathBuf,
+    #[clap(long = "username", default_value = "jason")]
+    pub username: String,
+
+    #[clap(long = "password", default_value = "supersecure")]
+    pub password: String,
+
+    #[clap(long = "subscribe", default_values = ["system/home/#"])]
+    pub subscribed_topics: Option<Vec<String>>,
+
+    #[clap(long = "publish", default_values = ["cpu-usage", "used-memory"])]
+    pub publish: Option<Vec<PublishData>>,
+
+    #[clap(long = "ping", default_value = "true")]
+    pub ping: bool,
 }
 
-#[derive(Debug)]
-enum PacketOpts {
-    Connect,
-    Disconnect,
-    Publish,
-    Subscribe,
-    Unsubscribe,
-}
+pub async fn run_client(config: ClientConfig, cancel_token: CancellationToken) -> Result<()> {
+    let mut sys = System::new();
 
-impl std::fmt::Display for PacketOpts {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-pub async fn run_client(config: ClientConfig) -> Result<()> {
     let endpoint = setup_quic(&config).await?;
 
     info!("Connecting to {}", config.remote);
     let conn = endpoint
         .connect(config.remote, &config.host.clone())?
         .await
-        .map_err(|e| anyhow!("Failed to connect: {}", e))?;
-    let (send, recv) = conn
-        .open_bi()
-        .await
-        .map_err(|e| anyhow!("Failed to open stream: {}", e))?;
+        .context("Failed to connect")?;
+    let (send, recv) = conn.open_bi().await.context("Failed to open stream")?;
+
     info!("Connection established");
 
     let transport = QuicTransport::new(send, recv);
     let mut protocol = MqttProtocol::new(transport);
 
-    let (sender, mut receiver) = mpsc::channel(100);
+    protocol
+        .send_packet(Packet::Connect(Connect {
+            protocol: mqttbytes::Protocol::V5,
+            keep_alive: 0,
+            client_id: "home".to_string(),
+            clean_session: true,
+            last_will: None,
+            login: Some(Login {
+                username: config.username,
+                password: config.password,
+            }),
+            properties: None,
+        }))
+        .await
+        .context("Failed to connect with MQTT")?;
 
-    let token = CancellationToken::new();
+    // Expect ConnAck
+    let conn_ack = match protocol.recv_packet().await {
+        Ok(Packet::ConnAck(conn_ack)) => {
+            info!("Received {:?}", PacketType::ConnAck);
+            conn_ack
+        }
+        Ok(packet) => {
+            return Err(anyhow::anyhow!(
+                "Expected {:?}, received: {:?}",
+                PacketType::ConnAck,
+                packet_type(packet)
+            ))
+        }
+        Err(e) => {
+            return Err(
+                anyhow::anyhow!(e).context(format!("Failed to receive {:?}", PacketType::ConnAck))
+            )
+        }
+    };
 
-    let cloned_token = token.clone();
+    sys.refresh_cpu_usage();
 
-    let sender_clone = sender.clone();
+    let publish_period = Duration::from_secs(10);
 
-    let user_prompt_task = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = cloned_token.cancelled() => break,
-                r = prompt_user_action(&sender_clone) => {
-                    if let Err(e) = r {
-                        error!("Error: {}", e);
-                        break;
-                    }
-                }
+    if let Some(subscribed_topics) = &config.subscribed_topics {
+        info!("Subscribing to {:?}", subscribed_topics);
+        protocol
+            .send_packet(Packet::Subscribe(Subscribe {
+                pkid: 0,
+                filters: subscribed_topics
+                    .iter()
+                    .map(|topic| SubscribeFilter::new(topic.to_string(), QoS::AtMostOnce))
+                    .collect(),
+                properties: None,
+            }))
+            .await
+            .context("Failed to subscribe")?;
+    }
+
+    // Expect SubAck
+    match protocol.recv_packet().await {
+        Ok(Packet::SubAck(sub_ack)) => {
+            let subscribed_topics = config.subscribed_topics.unwrap();
+            let combined = zip(subscribed_topics, sub_ack.return_codes);
+            for (topic, return_code) in combined {
+                info!(
+                    "Subscription for '{}' acknowledged with {:?}",
+                    topic, return_code
+                );
             }
         }
-    });
-
-    let mut ping_task: Option<JoinHandle<()>> = None;
-
-    loop {
-        if user_prompt_task.is_finished() {
-            info!("Exiting...");
-            if let Some(handle) = ping_task {
-                handle.abort();
-            }
-            break;
+        Ok(packet) => {
+            return Err(anyhow::anyhow!(
+                "Expected {:?}, received: {:?}",
+                PacketType::SubAck,
+                packet_type(packet)
+            ))
         }
-
-        if let Ok(packet) = receiver.try_recv() {
-            protocol.send_packet(packet).await?;
-        }
-
-        match timeout(Duration::from_millis(500), protocol.recv_packet()).await {
-            Ok(recv) => match recv {
-                Ok(Packet::ConnAck(conn_ack)) => {
-                    info!("Received: {:?}", conn_ack);
-                    let ping_timeout = conn_ack.properties.and_then(|p| p.server_keep_alive);
-                    let sender = sender.clone();
-                    if let Some(p) = ping_timeout {
-                        if ping_task.is_none() {
-                            let cloned_token = token.clone();
-
-                            ping_task = Some(tokio::spawn(async move {
-                                let mut interval = time::interval(Duration::from_secs(p.into()));
-
-                                loop {
-                                    tokio::select! {
-                                        _ = interval.tick() => {
-                                            if let Err(e) = sender.send(Packet::PingReq).await {
-                                                error!("Sending PingReq failed: {}. No more PingReq's will be sent", e);
-                                                break;
-                                            }
-                                        }
-                                        _ = cloned_token.cancelled() => break,
-                                    }
-                                }
-                            }));
-                        }
-                    }
-                }
-                Ok(packet) => {
-                    info!("Received: {:?}", packet);
-                }
-                Err(e) => return Err(anyhow::anyhow!(e)),
-            },
-            Err(_) => continue,
+        Err(e) => {
+            return Err(
+                anyhow::anyhow!(e).context(format!("Failed to receive {:?}", PacketType::SubAck))
+            )
         }
     }
 
-    //send.finish()?;
-    conn.close(0u32.into(), b"done");
+    let publish_config: HashSet<PublishData> =
+        config.publish.unwrap_or_default().into_iter().collect();
 
-    // Give the server a fair chance to receive the close packet
-    endpoint.wait_idle().await;
+    if !publish_config.is_empty() {
+        info!(
+            "Publishing {:?} every {}s",
+            publish_config,
+            publish_period.as_secs()
+        );
+    }
 
-    Ok(())
+    let mut publish_interval = time::interval(publish_period);
+    let mut ping_interval = time::interval(Duration::from_secs(
+        conn_ack
+            .properties
+            .map(|properties| properties.server_keep_alive)
+            .flatten()
+            .unwrap_or(10)
+            .into(),
+    ));
+
+    loop {
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                info!("Disconnecting...");
+                protocol.send_packet(Packet::Disconnect(Disconnect::new())).await?;
+
+                conn.close(0u32.into(), b"done");
+
+                // Give the server a fair chance to receive the close packet
+                endpoint.wait_idle().await;
+
+                return Ok(());
+            }
+            _ = publish_interval.tick() => {
+                    for p in publish_config.iter() {
+                        match p {
+                            PublishData::CpuUsage => {
+                                sys.refresh_cpu_usage();
+                                for cpu in sys.cpus() {
+                                    protocol
+                                        .send_packet(Packet::Publish(Publish::new(
+                                            format!("system/home/cpu/{}/usage", cpu.name()),
+                                            QoS::AtMostOnce,
+                                            cpu.cpu_usage().to_string(),
+                                        )))
+                                        .await
+                                        .context("Failed to PUBLISH CPU usage")?;
+                                }
+                            },
+                            PublishData::UsedMemory => {
+                                sys.refresh_memory();
+                                protocol
+                                .send_packet(Packet::Publish(Publish::new(
+                                    "system/home/memory/used",
+                                    QoS::AtMostOnce,
+                                    sys.used_memory().to_string(),
+                                )))
+                                .await
+                                .context("Failed to PUBLISH used memory")?;
+                            },
+                        }
+                    }
+            }
+            _ = ping_interval.tick() => {
+                if config.ping {
+                    info!("Sending {:?}", PacketType::PingReq);
+                    protocol.send_packet(Packet::PingReq).await.context("Failed to send PingReq")?;
+                }
+            }
+            packet = protocol.recv_packet() => {
+                match packet {
+                    Ok(Packet::Publish(publish)) => {
+                        let payload = String::from_utf8(publish.payload.to_vec()).unwrap_or_else(|e| format!("Parsing error: {}", e));
+                        info!("Received {:?} for topic {} with payload: {}", PacketType::Publish, publish.topic, payload);
+                    }
+                    Ok(packet) => {
+                        info!("Received {:?}", packet);
+                    }
+                    Err(e) => return Err(anyhow::anyhow!(e)),
+                }
+            }
+        }
+    }
 }
 
 async fn setup_quic(config: &ClientConfig) -> Result<Endpoint> {
@@ -172,57 +257,4 @@ async fn setup_quic(config: &ClientConfig) -> Result<Endpoint> {
     endpoint.set_default_client_config(client_config);
 
     Ok(endpoint)
-}
-
-async fn prompt_user_action(sender: &mpsc::Sender<Packet>) -> Result<()> {
-    let options = vec![
-        PacketOpts::Connect,
-        PacketOpts::Disconnect,
-        PacketOpts::Publish,
-        PacketOpts::Subscribe,
-        PacketOpts::Unsubscribe,
-    ];
-    let ans = Select::new("Which MQTT packet do you want to send?", options).prompt()?;
-
-    let packet = match ans {
-        PacketOpts::Connect => {
-            let username = Text::new("Username:").with_default("jason").prompt()?;
-            let password = Text::new("Password:")
-                .with_default("supersecure")
-                .prompt()?;
-
-            Ok::<Packet, anyhow::Error>(Packet::Connect(Connect {
-                login: Some(Login { username, password }),
-                protocol: mqttbytes::Protocol::V5,
-                keep_alive: 0,
-                client_id: ClientID::new().to_string(),
-                clean_session: true,
-                last_will: None,
-                properties: None,
-            }))
-        }
-        PacketOpts::Disconnect => Ok(Packet::Disconnect(Disconnect::new())),
-        PacketOpts::Publish => {
-            let topic = Text::new("Topic:").with_default("mytopic").prompt()?;
-            let payload = Text::new("Payload:").with_default("Hello World").prompt()?;
-
-            Ok(Packet::Publish(Publish::new(
-                topic,
-                QoS::AtMostOnce,
-                payload,
-            )))
-        }
-        PacketOpts::Subscribe => {
-            let path = Text::new("Path:").with_default("mytopic").prompt()?;
-            Ok(Packet::Subscribe(Subscribe::new(path, QoS::AtMostOnce)))
-        }
-        PacketOpts::Unsubscribe => {
-            let topic = Text::new("Topic:").with_default("mytopic").prompt()?;
-            Ok(Packet::Unsubscribe(Unsubscribe::new(topic)))
-        }
-    }?;
-
-    sender.send(packet).await?;
-
-    Ok(())
 }

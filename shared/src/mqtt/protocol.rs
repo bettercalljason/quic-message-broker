@@ -8,6 +8,12 @@ use crate::transport::Transport;
 
 use super::{MqttCodec, MqttError};
 
+
+#[repr(u32)]
+pub enum ProtocolErrorCode {
+    MqttNoError = 0x0100,
+}
+
 #[derive(thiserror::Error)]
 pub enum ProtocolError {
     #[error("MQTT: {0}")]

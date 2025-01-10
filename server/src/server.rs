@@ -8,7 +8,9 @@ use rustls::pki_types::PrivatePkcs8KeyDer;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use shared::mqtt::{ClientID, ProtocolError};
 use shared::{mqtt::MqttProtocol, transport::QuicTransport, transport::ALPN_QUIC_MQTT};
-use std::fs;
+use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,6 +19,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::timeout;
 use tracing::{error, info, info_span, Instrument};
 
+use crate::auth::{AuthStore, User};
 use crate::handler::{BrokerConfig, PacketHandler};
 use crate::state::ServerState;
 
@@ -35,10 +38,19 @@ pub struct ServerConfig {
     /// Maximum number of concurrent connections to allow
     #[clap(long = "connection-limit", default_value = "10")]
     pub connection_limit: Option<usize>,
+
+    #[clap(short = 'u', long = "users")]
+    pub users_file: PathBuf,
 }
 
 pub async fn run_server(config: ServerConfig) -> Result<()> {
-    let state = Arc::new(ServerState::new());
+    let file = File::open(&config.users_file).context("Could not open users file")?;
+    let reader = BufReader::new(file);
+    let users: HashMap<String, User> =
+        serde_json::from_reader(reader).context("Could not parse users file")?;
+    let auth_store = AuthStore::new(users);
+
+    let state = Arc::new(ServerState::new(auth_store));
 
     let endpoint = setup_quic(&config).await?;
 
@@ -201,24 +213,26 @@ async fn handle_client(
                 .context("Failed to send packet")?;
         }
 
-        if let Ok(recv) = timeout(Duration::from_millis(100), protocol.recv_packet()).await { match recv {
-            Ok(packet) => {
-                PacketHandler::process_packet(
-                    packet, config, state, client_id, username, sender,
-                )
-                .await?;
+        if let Ok(recv) = timeout(Duration::from_millis(100), protocol.recv_packet()).await {
+            match recv {
+                Ok(packet) => {
+                    PacketHandler::process_packet(
+                        packet, config, state, client_id, username, sender,
+                    )
+                    .await?;
+                }
+                Err(ProtocolError::MqttError(e)) => {
+                    error!("Error: {}; disconnecting client", e);
+                    state.remove_client(client_id).await;
+                    let _ = sender.try_send(mqttbytes::v5::Packet::Disconnect(Disconnect {
+                        reason_code: DisconnectReasonCode::ProtocolError,
+                        properties: None,
+                    }));
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(e));
+                }
             }
-            Err(ProtocolError::MqttError(e)) => {
-                error!("Error: {}; disconnecting client", e);
-                state.remove_client(client_id).await;
-                let _ = sender.try_send(mqttbytes::v5::Packet::Disconnect(Disconnect {
-                    reason_code: DisconnectReasonCode::ProtocolError,
-                    properties: None,
-                }));
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!(e));
-            }
-        } }
+        }
     }
 }

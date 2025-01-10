@@ -36,7 +36,6 @@ fn main() {
 
 #[tokio::main]
 async fn run(config: ServerConfig) -> Result<()> {
-
     run_server(config).await?;
 
     Ok(())

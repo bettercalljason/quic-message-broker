@@ -1,13 +1,8 @@
-use std::{
-    fs::File,
-    net::{IpAddr, Ipv6Addr, SocketAddr},
-    sync::Arc,
-};
-
 use anyhow::Result;
 use clap::Parser;
 use client::{run_client, ClientConfig};
-use inquire::CustomType;
+use tokio::signal;
+use tokio_util::sync::CancellationToken;
 use tracing::error;
 
 mod client;
@@ -15,17 +10,12 @@ mod client;
 fn main() {
     let config = ClientConfig::parse();
 
-    // Open or create a log file
-    let file = File::create(&config.log_file).expect("Failed to create log file");
-    let file = Arc::new(file); // Arc<Mutex> for safe access across threads
-
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
                     .unwrap_or(tracing_subscriber::EnvFilter::new("info")),
             )
-            .with_writer(file)
             .finish(),
     )
     .unwrap();
@@ -47,16 +37,27 @@ fn main() {
 
 #[tokio::main]
 async fn run(config: ClientConfig) -> Result<()> {
-    let remote = CustomType::<SocketAddr>::new("Enter broker address:")
-        .with_default(SocketAddr::new(
-            IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)),
-            8883,
-        ))
-        .prompt()?;
+    let my_config = ClientConfig { ..config };
 
-    let my_config = ClientConfig { remote, ..config };
+    let token = CancellationToken::new();
+    let token_clone = token.clone();
 
-    run_client(my_config).await?;
+    let task_handle = tokio::spawn(async move {
+        if let Err(err) = run_client(my_config, token_clone).await {
+            error!("Task failed: {}", err);
+        }
+    });
+
+    match signal::ctrl_c().await {
+        Ok(()) => {}
+        Err(err) => {
+            error!("Unable to listen for shutdown signal: {}", err);
+        }
+    }
+
+    token.cancel();
+
+    task_handle.await.unwrap();
 
     Ok(())
 }

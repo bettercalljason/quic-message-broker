@@ -1,0 +1,12 @@
+{
+  "user1": {
+      "password": "password1",
+      "allowed_filters": ["system/home/#"],
+      "allowed_topics": ["system/home/#"]
+  },
+  "user2": {
+      "password": "password2",
+      "allowed_filters": ["filter3"],
+      "allowed_topics": ["topic3", "topic4"]
+  }
+}

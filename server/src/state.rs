@@ -8,7 +8,7 @@ use tokio::sync::{
 };
 use tracing::info;
 
-use crate::auth::{AuthStore, User};
+use crate::auth::AuthStore;
 
 pub struct ClientInfo {
     pub subscriptions: Vec<String>,
@@ -21,21 +21,10 @@ pub struct ServerState {
 }
 
 impl ServerState {
-    pub fn new() -> Self {
-        let mut users = HashMap::new();
-        users.insert(
-            "jason".to_string(),
-            User::new(
-                "jason".to_string(),
-                "supersecure".to_string(),
-                vec!["system/home/#".to_string()],
-                vec!["system/home/#".to_string()],
-            ),
-        );
-
+    pub fn new(auth_store: AuthStore) -> Self {
         Self {
             clients: RwLock::new(HashMap::new()),
-            auth_store: RwLock::new(AuthStore::new(users)),
+            auth_store: RwLock::new(auth_store),
         }
     }
 
