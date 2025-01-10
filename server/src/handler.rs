@@ -7,7 +7,7 @@ use tracing::{info, warn};
 
 pub struct BrokerConfig {
     pub max_qos: QoS,
-    pub keep_alive: u16, // Set it to the Transport's max idle timeout: https://github.com/quinn-rs/quinn/blob/f5b1ec7dd96c9b56ef98f2a7a91acaf5e341d718/quinn-proto/src/config/transport.rs#L331
+    pub keep_alive: u16,
 }
 
 pub struct PacketHandler;

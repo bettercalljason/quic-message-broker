@@ -56,7 +56,7 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
 
     let config2 = Arc::new(BrokerConfig {
         max_qos: QoS::AtMostOnce,
-        keep_alive: 10, // typically, this is a few minutes. server should close if no packet received within 1.5 times of this time MQTT-3.1.2-22
+        keep_alive: 10,
     });
 
     while let Some(conn) = endpoint.accept().await {
